@@ -10,3 +10,4 @@
 !/.github/workflows/
 /.github/workflows/*
 !/.github/workflows/runner-smoke.yml
+!/.github/workflows/toolchain-smoke.yml

@@ -1,0 +1,470 @@
+name: Toolchain smoke
+
+on:
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  toolchain:
+    name: Hosted toolchain smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Verify runner and create private workspace
+        id: runner
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          arch="$(uname -m)"
+          printf 'Runner: %s %s (%s)\n' "$ID" "$VERSION_ID" "$arch"
+          [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 && "$arch" == x86_64 ]]
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
+          workspace="$(realpath -e -- "$GITHUB_WORKSPACE")"
+          runner_temp="$(realpath -e -- "$RUNNER_TEMP")"
+          [[ "$(pwd -P)" == "$workspace" && -d "$runner_temp" ]]
+          if [[ "$workspace/" == "$runner_temp/"* || "$runner_temp/" == "$workspace/"* ]]; then
+            echo 'Workspace and runner temp must be separate.' >&2
+            exit 1
+          fi
+          entry="$(find "$workspace" -mindepth 1 -maxdepth 1 -print -quit)"
+          [[ -z "$entry" ]]
+          for command in curl gpg python3 realpath sha256sum timeout; do
+            command -v "$command" >/dev/null || { echo "Missing runner tool: $command" >&2; exit 1; }
+          done
+          toolchain="$(mktemp -d "$runner_temp/ci3b0.XXXXXXXX")"
+          printf 'TOOLCHAIN_DIR=%s\n' "$toolchain" >> "$GITHUB_ENV"
+          printf 'observed=Ubuntu %s %s\n' "$VERSION_ID" "$arch" >> "$GITHUB_OUTPUT"
+
+      - name: Provision exact CPython
+        id: python_setup
+        if: steps.runner.outcome == 'success'
+        continue-on-error: true
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12.3'
+          architecture: x64
+          check-latest: false
+          token: ''
+
+      - name: Verify CPython version and architecture
+        id: python
+        if: steps.python_setup.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -I - "$GITHUB_OUTPUT" <<'PY'
+          import platform
+          import sys
+
+          version = platform.python_version()
+          print(f"{platform.python_implementation()} {version} {platform.machine()}")
+          with open(sys.argv[1], "a", encoding="utf-8") as output:
+              print(f"observed={version}", file=output)
+          if platform.python_implementation() != "CPython" or version != "3.12.3":
+              raise SystemExit("Unexpected Python implementation or patch version")
+          if sys.platform != "linux" or platform.machine() != "x86_64":
+              raise SystemExit("Expected Linux x86_64 Python")
+          PY
+
+      - name: Verify and install exact Linux wheels
+        id: dependencies
+        if: steps.python.outcome == 'success'
+        continue-on-error: true
+        env:
+          PIP_CONFIG_FILE: /dev/null
+        run: |
+          set -euo pipefail
+          lock="$TOOLCHAIN_DIR/requirements.txt"
+          # Public PyPI metadata for the exact Linux wheels, one SHA-256 per distribution.
+          cat > "$lock" <<'LOCK'
+          aiodns==3.6.1 --hash=sha256:46233ccad25f2037903828c5d05b64590eaa756e51d12b4a5616e2defcbc98c7
+          aiohappyeyeballs==2.7.1 --hash=sha256:9243213661e29250eb41368e5daa826fc017156c3b8a11440826b2e3ed376472
+          aiohttp==3.14.3 --hash=sha256:543906c127fb1d929b95076db19b83fa2d46751006ff1e23b093aa5ac4d8db42
+          aiomultiprocess==0.9.1 --hash=sha256:3a7b3bb3c38dbfb4d9d1194ece5934b6d32cf0280e8edbe64a7d215bba1322c6
+          aiosignal==1.4.0 --hash=sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e
+          annotated-types==0.8.0 --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
+          argcomplete==3.7.2 --hash=sha256:6029205678bdd9c1c728a155f5f9ecf5812393f969eef58807641a2bc2aa5b19
+          asteval==1.0.6 --hash=sha256:5e119ed306e39199fd99c881cea0e306b3f3807f050c9be79829fe274c6378dc
+          attrs==26.1.0 --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+          bc-detect-secrets==1.5.50 --hash=sha256:016ce9e79f692adbabcbef4a7293db427352911c3f81404a136e6f5c3e54a7f2
+          bc-jsonpath-ng==1.6.1 --hash=sha256:2c85bb1d194376808fe1fc49558dd484e39024b15c719995e22de811e6ba4dc8
+          bc-python-hcl2==0.4.3 --hash=sha256:b0cce4cea16823f7da7fefa0f8177dfb91f51a1befe64ef59d8fe4d5ac616eec
+          beartype==0.22.9 --hash=sha256:d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2
+          beautifulsoup4==4.15.0 --hash=sha256:d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9
+          boolean-py==5.0 --hash=sha256:ef28a70bd43115208441b53a045d1549e2f0ec6e3d08a9d142cbc41c1938e8d9
+          boto3==1.35.49 --hash=sha256:b660c649a27a6b47a34f6f858f5bd7c3b0a798a16dec8dda7cbebeee80fd1f60
+          botocore==1.35.99 --hash=sha256:b22d27b6b617fc2d7342090d6129000af2efd20174215948c0d7ae2da0fab445
+          cached-property==2.0.1 --hash=sha256:f617d70ab1100b7bcf6e42228f9ddcb78c676ffa167278d9f730d1c2fba69ccb
+          cachetools==5.5.2 --hash=sha256:d26a22bcc62eb95c3beabd9f1ee5e820d3d2704fe2967cbe350e20c8ffcd3f0a
+          certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+          cffi==2.1.1 --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf
+          charset-normalizer==3.5.1 --hash=sha256:b9af956078716df40d985fb0dfeb2c2120c5ca92ba4ff4b388acfd01cdc14d08
+          checkov==3.3.17 --hash=sha256:57b804d1d06ee642af0b8992af970f07a11d129444aac36d6e2ae7ba129bfd13
+          click==8.5.0 --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+          click-option-group==0.5.9 --hash=sha256:ad2599248bd373e2e19bec5407967c3eec1d0d4fc4a5e77b08a0481e75991080
+          cloudpickle==3.1.2 --hash=sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a
+          cloudsplaining==0.7.0 --hash=sha256:8e93c7b1671c8353f520627cdf7917ec543581c9b9936b3d344817bb4747174e
+          colorama==0.4.6 --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+          configargparse==1.7.7 --hash=sha256:61107bb1de0b53c4eb7a475a12de6783b0dc6c51bc9859f5accbe97d66f8a4b7
+          contextlib2==21.6.0 --hash=sha256:3fbdb64466afd23abaf6c977627b75b6139a5a3e8ce38405c5b413aed7a0471f
+          cyclonedx-python-lib==7.6.2 --hash=sha256:c42fab352cc0f7418d1b30def6751d9067ebcf0e8e4be210fc14d6e742a9edcc
+          decorator==5.3.1 --hash=sha256:f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c
+          defusedxml==0.7.1 --hash=sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61
+          docker==7.2.0 --hash=sha256:a3f45fdeb9165e2d25d9a1d02ddf3bc70fb572cf5ebbf9b58558c22caf29b71f
+          dockerfile-parse==2.0.1 --hash=sha256:bdffd126d2eb26acf1066acb54cb2e336682e1d72b974a40894fac76a4df17f6
+          dpath==2.1.3 --hash=sha256:d9560e03ccd83b3c6f29988b0162ce9b34fd28b9d8dbda46663b20c68d9cdae3
+          ecdsa==0.19.2 --hash=sha256:840f5dc5e375c68f36c1a7a5b9caad28f95daa65185c9253c0c08dd952bb7399
+          frozenlist==1.8.0 --hash=sha256:494a5952b1c597ba44e0e78113a7266e656b9794eec897b19ead706bd7074383
+          gitdb==4.0.12 --hash=sha256:67073e15955400952c6565cc3e707c554a4eea2e428946f7a4c162fab9bd9bcf
+          gitpython==3.1.62 --hash=sha256:7002251225e10e29d2e1f49e6532613fe5d5d9f0b6f1f02997a52b38fe56899e
+          idna==3.19 --hash=sha256:815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4
+          importlib-metadata==7.2.1 --hash=sha256:ffef94b0b66046dd8ea2d619b701fe978d9264d38f3998bc4c27ec3b146a87c8
+          jinja2==3.1.6 --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
+          jmespath==1.1.0 --hash=sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64
+          joblib==1.6.0 --hash=sha256:3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba
+          jsonschema==4.26.0 --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+          jsonschema-specifications==2025.9.1 --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+          junit-xml==1.9 --hash=sha256:ec5ca1a55aefdd76d28fcc0b135251d156c7106fa979686a4b48d62b761b4732
+          lark==1.3.1 --hash=sha256:c629b661023a014c37da873b4ff58a817398d12635d3bbb2c5a03be7fe5d1e12
+          license-expression==30.4.4 --hash=sha256:421788fdcadb41f049d2dc934ce666626265aeccefddd25e162a26f23bcbf8a4
+          markdown==3.10.3 --hash=sha256:fa6c92a00a4a3c98b22728c64a935ae1928250ae65058a6ded814d2cc29a4cea
+          markupsafe==3.0.3 --hash=sha256:d6dd0be5b5b189d31db7cda48b91d7e0a9795f31430b7f271219ab30f1d3ac9d
+          multidict==6.8.0 --hash=sha256:003a3bddb32915c3f67096ea41d24e53edf710edb65a1f5d0c70ab40b0e4d20b
+          narwhals==2.26.0 --hash=sha256:29326d74f107c347fd1009bd58e38d9f7c7c5b51e6de97bc93dbc325d9038b54
+          networkx==2.6.3 --hash=sha256:80b6b89c77d1dfb64a4c7854981b60aeea6360ac02c6d4e4913319e0a313abef
+          numpy==2.5.3 --hash=sha256:b7e18c623bb5c95acb3b3328861272816ba199fb531921c5d6d0b675f1fde9e3
+          orjson==3.12.0 --hash=sha256:1192a7021b6d071aaf909864f6e924d6a2675ca360485b972b8401749311750b
+          packageurl-python==0.13.4 --hash=sha256:62aa13d60a0082ff115784fefdfe73a12f310e455365cca7c6d362161067f35f
+          packaging==23.2 --hash=sha256:8c491190033a9af7e1d931d0b5dacc2ef47509b34dd0de67ed209b5203fc88c7
+          pandas==3.0.5 --hash=sha256:d373ce03ffd84010ed9839fa73672a9c8256990532e158440c0085db7d914b34
+          platformdirs==4.11.8 --hash=sha256:52f2f181bbfde907966932cc8312d967d02976422d66d537ea16092b8e291081
+          ply==3.11 --hash=sha256:096f9b8350b65ebd2fd1346b12452efe5b9607f7482813ffca50c22722a807ce
+          policy-sentry==0.13.2 --hash=sha256:e82c3bc1783606449399c4221f67d05f6b08d8a184ba2fee87d04541d7282b86
+          prettytable==3.18.0 --hash=sha256:b3346e0e6f79180833aebaac088ae926340586cf6d7d991b9eb125b65f72313a
+          propcache==0.5.4 --hash=sha256:2814ecd8e818f487bee4b0f921bc4d1c176cc5fc71ac0f072d0fa67eda4ac14b
+          py-serializable==1.1.2 --hash=sha256:801be61b0a1ba64c3861f7c624f1de5cfbbabf8b458acc9cdda91e8f7e5effa1
+          pycares==4.11.0 --hash=sha256:2d5cac829da91ade70ce1af97dad448c6cd4778b48facbce1b015e16ced93642
+          pycep-parser==0.5.1 --hash=sha256:8c3f99c0dc1301193b1bcbe0a44c6b2763f6d2daf24964ca48dcdfbb73087fa0
+          pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+          pydantic==2.13.5 --hash=sha256:346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73
+          pydantic-core==2.46.5 --hash=sha256:0fc5be0abd4a407e200d844b404e33639a554e7bd0d448e7b9ae181be4789ac2
+          pyparsing==3.3.2 --hash=sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d
+          python-dateutil==2.9.0.post0 --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
+          pyyaml==6.0.3 --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc
+          rdflib==7.6.0 --hash=sha256:30c0a3ebf4c0e09215f066be7246794b6492e054e782d7ac2a34c9f70a15e0dd
+          referencing==0.37.0 --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+          regex==2026.9.10 --hash=sha256:2e67f8843f0e4b931f1fa860bf3bbe4134b714c0155cc5c7c0d7ea450230aae0
+          requests==2.34.2 --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+          rpds-py==2026.6.3 --hash=sha256:ecabd69db66de867690f9797f2f8fa27ba501bbc24540cbdbdc649cd15888ba6
+          rustworkx==0.18.1 --hash=sha256:1ebd2441a51c68a784df8c62dc2e6f1a9f58c0eb1c2e21fd59776e08f55c0c0b
+          s3transfer==0.10.4 --hash=sha256:244a76a24355363a68164241438de1b72f8781664920260c48465896b712a41e
+          schema==0.7.5 --hash=sha256:f3ffdeeada09ec34bf40d7d79996d9f7175db93b7a5065de0faa7f41083c1e6c
+          scikit-learn==1.9.1 --hash=sha256:e5d7b18a5b9dca241a74695f3275fa4c895a9dadc72b3d8df5fa9d1083c9b83e
+          scipy==1.18.1 --hash=sha256:f55fa87b6c612ecd6b058f167c53231b1d14e412efe361d3d6e38b3631c73218
+          semantic-version==2.10.0 --hash=sha256:de78a3b8e0feda74cabc54aab2da702113e33ac9d9eb9d2389bcf1f58b7d9177
+          six==1.17.0 --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+          smmap==5.0.3 --hash=sha256:c106e05d5a61449cf6ba9a1e650227ecfb141590d2a98412103ff35d89fc7b2f
+          sortedcontainers==2.4.0 --hash=sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0
+          soupsieve==2.9.2 --hash=sha256:8089a26fd974ca7a1f30276d3d8492ab266ab15af581642dfe8aa162e0c1c823
+          spdx-tools==0.8.5 --hash=sha256:7c2d5865941be9d2e898f5b084e8d5422dd298dc5a29320ddb198fec304f59c4
+          tabulate==0.9.0 --hash=sha256:024ca478df22e9340661486f85298cff5f6dcdba14f3813e8830015b9ed1948f
+          termcolor==2.3.0 --hash=sha256:3afb05607b89aed0ffe25202399ee0867ad4d3cb4180d98aaf8eefa6a5f7d475
+          threadpoolctl==3.7.0 --hash=sha256:cd8b60b5641b45c67bbf73c64c843235fc2d8a480c87389f52f5dbee893b86be
+          tqdm==4.70.1 --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
+          typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+          typing-inspection==0.4.4 --hash=sha256:65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147
+          unidiff==1.0.1 --hash=sha256:5e2ca461eda8a4c761ad0922e3e8a65742f359dc60301a3a055b70fd7c158680
+          uritools==6.1.3 --hash=sha256:136f113e76e53f85bf2d9cce0c3d40ceec775d0409e7d6de9b28f046a7d42838
+          urllib3==2.8.0 --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3
+          wcwidth==0.8.3 --hash=sha256:d5b73dba6158a595ec9370350e7f2637bcac8d6c5e4fde34f30fcffb6103a5e4
+          xmltodict==1.0.4 --hash=sha256:a4a00d300b0e1c59fc2bfccb53d7b2e88c32f200df138a0dd2229f842497026a
+          yarl==1.25.1 --hash=sha256:c6f117789d22dce188e5754e8bc65b7e6ebf8cb73963b9fa761f672a5883769d
+          zipp==4.1.0 --hash=sha256:25ad4e16390cd314347dd8f1de67a2ac538ae658ed4ab9db16029c07c188e97f
+          LOCK
+          [[ "$(wc -l < "$lock")" -eq 103 ]]
+          printf 'pins=103\n' >> "$GITHUB_OUTPUT"
+          warehouse="$TOOLCHAIN_DIR/wheels"
+          mkdir "$warehouse"
+          python -I -m venv "$TOOLCHAIN_DIR/venv"
+          py="$TOOLCHAIN_DIR/venv/bin/python"
+          "$py" -I -m pip --isolated download --index-url https://pypi.org/simple \
+            --no-cache-dir --disable-pip-version-check --only-binary=:all: --no-deps \
+            --require-hashes -r "$lock" --dest "$warehouse"
+          "$py" -I - "$lock" "$warehouse" "$GITHUB_OUTPUT" <<'PY'
+          import hashlib
+          import sys
+          from pathlib import Path
+
+          expected = {line.rsplit(":", 1)[1] for line in Path(sys.argv[1]).read_text().splitlines()}
+          wheels = list(Path(sys.argv[2]).glob("*.whl"))
+          actual = set()
+          for wheel in wheels:
+              with wheel.open("rb") as source:
+                  actual.add(hashlib.file_digest(source, "sha256").hexdigest())
+          if len(wheels) != 103 or len(expected) != 103 or actual != expected:
+              raise SystemExit("Wheel inventory or SHA-256 does not match the pinned closure")
+          with open(sys.argv[3], "a", encoding="utf-8") as output:
+              print(f"available={len(wheels)}", file=output)
+          PY
+          "$py" -I -m pip --isolated install --no-index --find-links "$warehouse" \
+            --no-cache-dir --disable-pip-version-check --only-binary=:all: \
+            --require-hashes -r "$lock"
+          "$py" -I -m pip --isolated check
+          "$py" -I - "$lock" "$GITHUB_OUTPUT" <<'PY'
+          from importlib import import_module, metadata
+          from pathlib import Path
+          import re
+          import sys
+
+          def normalize(name):
+              return re.sub(r"[-_.]+", "-", name).lower()
+
+          pins = dict(line.split()[0].split("==") for line in Path(sys.argv[1]).read_text().splitlines())
+          installed = {normalize(d.metadata["Name"]): d.version for d in metadata.distributions()}
+          expected_names = set(pins) | {"pip"}
+          if set(installed) != expected_names:
+              raise SystemExit(f"Unexpected installed metadata inventory: {sorted(set(installed) ^ expected_names)}")
+          mismatches = [name for name, version in pins.items() if installed[name] != version]
+          if mismatches:
+              raise SystemExit(f"Unexpected installed versions: {mismatches}")
+          with open(sys.argv[2], "a", encoding="utf-8") as output:
+              print(f"installed={len(pins)}", file=output)
+          for module in ("numpy", "pandas", "scipy", "sklearn", "joblib", "yaml", "hcl2"):
+              import_module(module)
+          with open(sys.argv[2], "a", encoding="utf-8") as output:
+              print("imports=verified", file=output)
+          PY
+
+      - name: Verify HashiCorp signatures and Terraform version
+        id: terraform
+        if: steps.runner.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cat > "$TOOLCHAIN_DIR/hashicorp.sh" <<'BASH'
+          fetch() {
+            curl --fail --silent --show-error --location --proto '=https' \
+              --proto-redir '=https' --max-time 240 --retry 2 "$1" --output "$2"
+          }
+
+          verify_archive() {
+            local project="$1" version="$2" archive="$3" expected="$4" output="$5"
+            local base="https://releases.hashicorp.com/$project/$version"
+            local sums="${project}_${version}_SHA256SUMS"
+            local scratch="$TOOLCHAIN_DIR/$project"
+            local fingerprint="C874011F0AB405110D02105534365D9472D7468F"
+            local signing_subkey="374EC75B485913604A831CC7C820C6D5CD27AB87"
+            local signer
+
+            mkdir "$scratch"
+            fetch "$base/$sums" "$scratch/sums"
+            fetch "$base/$sums.72D7468F.sig" "$scratch/sums.sig"
+            signer="$(gpg --batch --no-tty --homedir "$TOOLCHAIN_DIR/gnupg" \
+              --no-auto-key-retrieve --status-fd 1 --verify "$scratch/sums.sig" "$scratch/sums")"
+            # A generic KEYEXPIRED can refer to an unrelated subkey in the keyring.
+            awk -v pin="$fingerprint" -v subkey="$signing_subkey" '
+              $2 ~ /^(BADSIG|ERRSIG|REVKEYSIG|EXPKEYSIG|EXPSIG)$/ { bad=1 }
+              $2 == "VALIDSIG" && $3 == subkey && $NF == pin { verified++ }
+              END { exit(bad || verified != 1) }
+            ' <<< "$signer"
+            [[ "$(awk -v name="$archive" '$2 == name {print $1}' "$scratch/sums")" == "$expected" ]]
+            fetch "$base/$archive" "$output"
+            printf '%s  %s\n' "$expected" "$output" | sha256sum --check --status
+          }
+          BASH
+          . "$TOOLCHAIN_DIR/hashicorp.sh"
+          mkdir -m 700 "$TOOLCHAIN_DIR/gnupg"
+          fetch https://www.hashicorp.com/.well-known/pgp-key.txt "$TOOLCHAIN_DIR/hashicorp.pub"
+          gpg --batch --no-tty --homedir "$TOOLCHAIN_DIR/gnupg" --import "$TOOLCHAIN_DIR/hashicorp.pub"
+          archive="$TOOLCHAIN_DIR/terraform.zip"
+          verify_archive terraform 1.16.2 terraform_1.16.2_linux_amd64.zip \
+            0d17011f0c4664539b164b044903d04e296c86c13cb9f28040076c65cfb3985a "$archive"
+          python3 -I - "$archive" "$TOOLCHAIN_DIR/bin" <<'PY'
+          from pathlib import Path
+          import shutil
+          import sys
+          import zipfile
+
+          destination = Path(sys.argv[2])
+          destination.mkdir()
+          binary = destination / "terraform"
+          with zipfile.ZipFile(sys.argv[1]) as archive, archive.open("terraform") as source, binary.open("xb") as out:
+              shutil.copyfileobj(source, out)
+          binary.chmod(0o500)
+          PY
+          mkdir -m 700 "$TOOLCHAIN_DIR/terraform-home"
+          env -i PATH=/usr/bin:/bin HOME="$TOOLCHAIN_DIR/terraform-home" CHECKPOINT_DISABLE=1 \
+            "$TOOLCHAIN_DIR/bin/terraform" version -json > "$TOOLCHAIN_DIR/terraform-version.json"
+          python3 -I - "$TOOLCHAIN_DIR/terraform-version.json" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          result = json.loads(Path(sys.argv[1]).read_bytes())
+          if result.get("terraform_version") != "1.16.2" or result.get("platform") != "linux_amd64":
+              raise SystemExit(f"Unexpected Terraform version or platform: {result}")
+          print("Terraform 1.16.2 linux_amd64")
+          with open(sys.argv[2], "a", encoding="utf-8") as output:
+              print("observed=1.16.2 linux_amd64", file=output)
+          PY
+
+      - name: Verify Checkov CLI from the locked environment
+        id: checkov
+        if: steps.dependencies.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$TOOLCHAIN_DIR/checkov-home"
+          version="$(env -i PATH=/usr/bin:/bin HOME="$TOOLCHAIN_DIR/checkov-home" PYTHONDONTWRITEBYTECODE=1 \
+            "$TOOLCHAIN_DIR/venv/bin/checkov" --version)"
+          [[ "$version" == "3.3.17" ]]
+          printf 'observed=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'Checkov %s\n' "$version"
+
+      - name: Verify AWS provider and initialize an isolated fixture
+        id: provider
+        if: steps.terraform.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          . "$TOOLCHAIN_DIR/hashicorp.sh"
+          archive=terraform-provider-aws_5.100.0_linux_amd64.zip
+          digest=1589a2266af699cbd5d80737a0fe02e54ec9cf2ca54e7e00ac51c7359056f274
+          fixture="$TOOLCHAIN_DIR/provider-fixture"
+          mirror="$TOOLCHAIN_DIR/provider-mirror"
+          package_dir="$mirror/registry.terraform.io/hashicorp/aws"
+          mkdir -p "$fixture" "$package_dir"
+          fetch https://registry.terraform.io/v1/providers/hashicorp/aws/5.100.0/download/linux/amd64 \
+            "$TOOLCHAIN_DIR/provider-distribution.json"
+          python3 -I - "$TOOLCHAIN_DIR/provider-distribution.json" "$archive" "$digest" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          metadata = json.loads(Path(sys.argv[1]).read_bytes())
+          base = "https://releases.hashicorp.com/terraform-provider-aws/5.100.0/"
+          checksums = base + "terraform-provider-aws_5.100.0_SHA256SUMS"
+          expected = {"os": "linux", "arch": "amd64", "filename": sys.argv[2], "shasum": sys.argv[3],
+                      "download_url": base + sys.argv[2], "shasums_url": checksums,
+                      "shasums_signature_url": checksums + ".72D7468F.sig"}
+          if any(metadata.get(key) != value for key, value in expected.items()):
+              raise SystemExit("Registry distribution metadata differs from trusted provider pins")
+          PY
+          printf 'metadata=verified\n' >> "$GITHUB_OUTPUT"
+          verify_archive terraform-provider-aws 5.100.0 "$archive" "$digest" "$package_dir/$archive"
+          printf 'archive=verified\n' >> "$GITHUB_OUTPUT"
+
+          cat > "$fixture/main.tf" <<'HCL'
+          terraform {
+            required_version = "= 1.16.2"
+            required_providers {
+              aws = {
+                source  = "hashicorp/aws"
+                version = "= 5.100.0"
+              }
+            }
+          }
+          HCL
+          cat > "$fixture/.terraform.lock.hcl" <<'HCL'
+          provider "registry.terraform.io/hashicorp/aws" {
+            version     = "5.100.0"
+            constraints = "5.100.0"
+            hashes = [
+              "h1:edXOJWE4ORX8Fm+dpVpICzMZJat4AX0VRCAy/xkcOc0=",
+              "zh:1589a2266af699cbd5d80737a0fe02e54ec9cf2ca54e7e00ac51c7359056f274",
+            ]
+          }
+          HCL
+          python3 -I - "$mirror" "$TOOLCHAIN_DIR/terraform.tfrc" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          mirror = json.dumps(sys.argv[1])
+          Path(sys.argv[2]).write_text(
+              'disable_checkpoint = true\nprovider_installation {\n  filesystem_mirror {\n'
+              f'    path = {mirror}\n    include = ["registry.terraform.io/hashicorp/aws"]\n  }}\n}}\n'
+          )
+          PY
+          sha256sum "$fixture/.terraform.lock.hcl" > "$TOOLCHAIN_DIR/fixture-lock.sha256"
+          mkdir -m 700 "$TOOLCHAIN_DIR/provider-home"
+          chmod a-w "$package_dir/$archive"
+          data="$TOOLCHAIN_DIR/provider-data"
+          timeout 180s env -i PATH=/usr/bin:/bin HOME="$TOOLCHAIN_DIR/provider-home" \
+            AWS_EC2_METADATA_DISABLED=true AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+            TF_IN_AUTOMATION=1 CHECKPOINT_DISABLE=1 TF_CLI_CONFIG_FILE="$TOOLCHAIN_DIR/terraform.tfrc" \
+            TF_DATA_DIR="$data" "$TOOLCHAIN_DIR/bin/terraform" -chdir="$fixture" \
+            init -backend=false -input=false -no-color -lockfile=readonly
+          sha256sum --check --status "$TOOLCHAIN_DIR/fixture-lock.sha256"
+          plugin="$data/providers/registry.terraform.io/hashicorp/aws/5.100.0/linux_amd64/terraform-provider-aws_v5.100.0_x5"
+          [[ -f "$plugin" && -x "$plugin" && ! -L "$plugin" ]]
+          printf 'init=verified\n' >> "$GITHUB_OUTPUT"
+
+      - name: Report component results and enforce the smoke result
+        if: ${{ always() }}
+        env:
+          RUNNER_OUTCOME: ${{ steps.runner.outcome }}
+          RUNNER_OBSERVED: ${{ steps.runner.outputs.observed }}
+          PYTHON_SETUP_OUTCOME: ${{ steps.python_setup.outcome }}
+          PYTHON_OUTCOME: ${{ steps.python.outcome }}
+          PYTHON_OBSERVED: ${{ steps.python.outputs.observed }}
+          DEP_OUTCOME: ${{ steps.dependencies.outcome }}
+          DEP_PINS: ${{ steps.dependencies.outputs.pins }}
+          DEP_AVAILABLE: ${{ steps.dependencies.outputs.available }}
+          DEP_INSTALLED: ${{ steps.dependencies.outputs.installed }}
+          DEP_IMPORTS: ${{ steps.dependencies.outputs.imports }}
+          TF_OUTCOME: ${{ steps.terraform.outcome }}
+          TF_OBSERVED: ${{ steps.terraform.outputs.observed }}
+          CHECKOV_OUTCOME: ${{ steps.checkov.outcome }}
+          CHECKOV_OBSERVED: ${{ steps.checkov.outputs.observed }}
+          PROVIDER_OUTCOME: ${{ steps.provider.outcome }}
+          PROVIDER_METADATA: ${{ steps.provider.outputs.metadata }}
+          PROVIDER_ARCHIVE: ${{ steps.provider.outputs.archive }}
+          PROVIDER_INIT: ${{ steps.provider.outputs.init }}
+        run: |
+          set -euo pipefail
+          state() {
+            case "$1" in
+              success) printf 'PASS' ;;
+              failure|cancelled) printf 'FAIL' ;;
+              *) printf 'NOT_RUN' ;;
+            esac
+          }
+
+          python_state="$(state "$PYTHON_OUTCOME")"
+          if [[ "$PYTHON_SETUP_OUTCOME" == failure ]]; then python_state=FAIL; fi
+          deps_state="$(state "$DEP_OUTCOME")"
+          if [[ "$deps_state" == FAIL && -n "$DEP_AVAILABLE" ]]; then deps_state=PARTIAL; fi
+          provider_state=NOT_VERIFIED
+          if [[ "$PROVIDER_OUTCOME" == success && "$PROVIDER_INIT" == verified ]]; then
+            provider_state=PASS
+          elif [[ "$PROVIDER_METADATA" == verified ]]; then
+            provider_state=PARTIAL
+          fi
+
+          overall=FAIL
+          if [[ "$RUNNER_OUTCOME" == success && "$python_state" == PASS && "$deps_state" == PASS &&
+                "$TF_OUTCOME" == success && "$CHECKOV_OUTCOME" == success && "$provider_state" == PASS ]]; then
+            overall=PASS
+          fi
+          {
+            echo '## Toolchain smoke'
+            echo '| Component | Expected | Observed | Status |'
+            echo '|---|---|---|---|'
+            printf '| Runner | Ubuntu 24.04 x64 | %s | %s |\n' "${RUNNER_OBSERVED:-no verified observation}" "$(state "$RUNNER_OUTCOME")"
+            printf '| Python | 3.12.3 | %s | %s |\n' "${PYTHON_OBSERVED:-no verified observation}" "$python_state"
+            printf '| Python dependencies | CI-2 exact wheels (103) | pins %s, wheels %s, installed %s, ABI imports %s | %s |\n' \
+              "${DEP_PINS:-unverified}" "${DEP_AVAILABLE:-unverified}" "${DEP_INSTALLED:-unverified}" "${DEP_IMPORTS:-unverified}" "$deps_state"
+            printf '| Terraform | 1.16.2 | %s | %s |\n' "${TF_OBSERVED:-no verified observation}" "$(state "$TF_OUTCOME")"
+            printf '| Checkov | 3.3.17 | %s | %s |\n' "${CHECKOV_OBSERVED:-no verified observation}" "$(state "$CHECKOV_OUTCOME")"
+            printf '| AWS provider | 5.100.0 linux_amd64 | registry %s, signed archive %s, fixture init %s | %s |\n' \
+              "${PROVIDER_METADATA:-unverified}" "${PROVIDER_ARCHIVE:-unverified}" "${PROVIDER_INIT:-unverified}" "$provider_state"
+            printf '\nWorkflow result: **%s**\n' "$overall"
+            echo 'This job checks toolchain readiness only.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          [[ "$overall" == PASS ]]
