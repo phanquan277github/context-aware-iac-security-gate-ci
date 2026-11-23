@@ -1,0 +1,49 @@
+name: Runner smoke
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  smoke:
+    name: Hosted runner smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify runner environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          report_failure() {
+            local status=$?
+            if (( status != 0 )); then
+              printf 'RUNNER_SMOKE_FAILURE (exit %s)\n' "$status" >&2
+            fi
+          }
+          trap report_failure EXIT
+
+          kernel="$(uname -s)"
+          architecture="$(uname -m)"
+          printf 'Runner OS: %s (%s)\n' "$RUNNER_OS" "$kernel"
+          printf 'Runner architecture: %s (%s)\n' "$RUNNER_ARCH" "$architecture"
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
+          [[ "$kernel" == Linux && "$architecture" == x86_64 ]]
+          python3 --version
+
+          [[ -d "$GITHUB_WORKSPACE" && -d "$RUNNER_TEMP" ]]
+          workspace="$(realpath -e -- "$GITHUB_WORKSPACE")"
+          runner_temp="$(realpath -e -- "$RUNNER_TEMP")"
+          [[ "$(pwd -P)" == "$workspace" ]]
+          if [[ "$workspace/" == "$runner_temp/"* || "$runner_temp/" == "$workspace/"* ]]; then
+            printf 'Workspace and runner temp are not separate directories.\n' >&2
+            exit 1
+          fi
+          workspace_entry="$(find "$workspace" -mindepth 1 -maxdepth 1 -print -quit)"
+          [[ -z "$workspace_entry" ]]
+          printf 'Workspace is empty and separate from runner temp.\n'
+          printf 'RUNNER_SMOKE_SUCCESS\n'

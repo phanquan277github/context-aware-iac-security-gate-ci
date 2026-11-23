@@ -1,0 +1,12 @@
+# Deny by default for the public bootstrap. Review new paths before allowing them.
+# Private docs, release candidates, research data, model binaries, virtual
+# environments, caches, wheels, mirrors, Terraform state/plans, credentials,
+# execution outputs and signing keys stay outside this initial allowlist.
+/*
+!/.gitignore
+!/README.md
+!/.github/
+/.github/*
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/runner-smoke.yml
