@@ -11,3 +11,17 @@
 /.github/workflows/*
 !/.github/workflows/runner-smoke.yml
 !/.github/workflows/toolchain-smoke.yml
+!/.github/workflows/security-gate.yml
+!/.github/workflows/security-gate-pr.yml
+!/.github/ci_gate.py
+!/.github/ci_gate_fixtures/
+/.github/ci_gate_fixtures/*
+!/.github/ci_gate_fixtures/pass/
+/.github/ci_gate_fixtures/pass/*
+!/.github/ci_gate_fixtures/pass/main.tf
+!/.github/ci_gate_fixtures/review/
+/.github/ci_gate_fixtures/review/*
+!/.github/ci_gate_fixtures/review/main.tf
+!/.github/ci_gate_fixtures/error/
+/.github/ci_gate_fixtures/error/*
+!/.github/ci_gate_fixtures/error/main.tf

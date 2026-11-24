@@ -1,0 +1,16 @@
+name: Security Gate PR signal
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths: ['terraform/**']
+
+permissions: {}
+
+jobs:
+  signal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - run: printf '%s\n' 'Terraform PR signal. The default-branch workflow handles the scan.'

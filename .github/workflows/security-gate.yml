@@ -1,0 +1,279 @@
+name: Security Gate advisory
+
+on:
+  workflow_run:
+    workflows: [Security Gate PR signal]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      fixture:
+        description: Trusted synthetic Terraform fixture
+        type: choice
+        options: [pass, review, error]
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  advisory:
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' &&
+       github.ref_name == github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUNTIME_SHA: ${{ vars.CI_GATE_RUNTIME_SHA }}
+      RUNTIME_ARCHIVE_SHA: ${{ vars.CI_GATE_RUNTIME_ARCHIVE_SHA256 }}
+      UBUNTU_IMAGE: ${{ vars.CI_GATE_UBUNTU_IMAGE }}
+    steps:
+      - name: Allocate one isolated output directory per attempt
+        id: workspace
+        run: |
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          timestamp="$(date -u -d "$started" +%Y%m%dT%H%M%SZ)"
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          name="${timestamp}_run-${GITHUB_RUN_ID}_attempt-${GITHUB_RUN_ATTEMPT}"
+          root="$(mktemp -d "$RUNNER_TEMP/ci3b.XXXXXXXX")"
+          mkdir "$root/raw" "$root/tools" "$root/$name"
+          {
+            printf 'RUN_ROOT=%s\n' "$root"
+            printf 'RAW_DIR=%s\n' "$root/raw"
+            printf 'REPORT_DIR=%s\n' "$root/$name"
+            printf 'TOOLCHAIN_DIR=%s\n' "$root/tools"
+            printf 'BUNDLE_DIR=%s\n' "$root/bundle"
+            printf 'STARTED_UTC=%s\n' "$started"
+          } >> "$GITHUB_ENV"
+          printf 'name=%s\n' "$name" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the trusted workflow commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-control
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: Resolve PR input and check trusted release pins
+        id: pins
+        run: |
+          [[ "$(git -C trusted-control rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          . /etc/os-release
+          [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 && "$(uname -m)" == x86_64 ]]
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            python3 -I -B trusted-control/.github/ci_gate.py resolve-pr >> "$GITHUB_OUTPUT"
+          fi
+          [[ "$RUNTIME_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'Trusted runtime commit pin missing or invalid.'; exit 1; }
+          [[ "$RUNTIME_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo 'Trusted archive digest missing or invalid.'; exit 1; }
+          [[ "$UBUNTU_IMAGE" =~ ^docker\.io/library/ubuntu@sha256:[0-9a-f]{64}$ ]] ||
+            { echo 'Trusted Ubuntu OCI digest missing or invalid.'; exit 1; }
+
+      - name: Check out the independently pinned release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RUNTIME_SHA }}
+          path: trusted-release
+          persist-credentials: false
+          submodules: false
+          lfs: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: /security_gate_payload/ci-gate-v1.tar
+
+      - name: Verify and unpack the trusted runtime
+        id: archive
+        run: |
+          [[ "$(git -C trusted-release rev-parse HEAD)" == "$RUNTIME_SHA" ]]
+          python3 -I -B trusted-control/.github/ci_gate.py unpack \
+            trusted-release/security_gate_payload/ci-gate-v1.tar "$RUNTIME_ARCHIVE_SHA" "$BUNDLE_DIR"
+
+      - name: Provision exact CPython
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12.3'
+          architecture: x64
+          check-latest: false
+          token: ''
+
+      - name: Provision the CI-3B0 toolchain
+        id: provision
+        env:
+          PIP_CONFIG_FILE: /dev/null
+        run: |
+          python -I -B -c 'import platform,sys; assert platform.python_implementation()=="CPython" and platform.python_version()=="3.12.3" and platform.machine()=="x86_64" and sys.platform=="linux"'
+          python -I -B trusted-control/.github/ci_gate.py provision "$RUN_ROOT"
+          for stage in dependencies terraform checkov provider; do
+            GITHUB_OUTPUT="$RUN_ROOT/toolchain-$stage.txt" bash --noprofile --norc "$RUN_ROOT/ci3b0-$stage.sh"
+          done
+          docker pull --platform linux/amd64 "$UBUNTU_IMAGE"
+
+      - name: Check out the exact Terraform PR head in a separate directory
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.pins.outputs.sha }}
+          path: pr-source
+          persist-credentials: false
+          submodules: false
+          lfs: false
+          sparse-checkout: terraform
+
+      - name: Stage only bounded Terraform blobs or a trusted fixture
+        id: input
+        env:
+          PR_SHA: ${{ steps.pins.outputs.sha }}
+          FIXTURE: ${{ inputs.fixture }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            python -I -B trusted-control/.github/ci_gate.py stage pr-source "$PR_SHA" "$RUN_ROOT/input"
+          else
+            python -I -B trusted-control/.github/ci_gate.py fixture "$FIXTURE" "$RUN_ROOT/input"
+          fi
+
+      - name: Run the parity Gate in an offline read-only sandbox
+        id: gate
+        run: |
+          pyroot="$(python -I -B -c 'import sys; print(sys.base_prefix)')"
+          [[ "$pyroot" == /opt/hostedtoolcache/Python/3.12.3/x64 ]]
+          set +e
+          timeout --kill-after=15s 720s docker run --rm --pull never --platform linux/amd64 --network none \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --memory 5g --cpus 2 --pids-limit 256 \
+            --tmpfs /tmp:rw,nosuid,nodev,exec,size=768m,mode=1777 \
+            --mount "type=bind,src=/usr,dst=/usr,readonly" \
+            --mount "type=bind,src=$pyroot,dst=$pyroot,readonly" \
+            --mount "type=bind,src=$BUNDLE_DIR,dst=$BUNDLE_DIR,readonly" \
+            --mount "type=bind,src=$TOOLCHAIN_DIR/bin,dst=$TOOLCHAIN_DIR/bin,readonly" \
+            --mount "type=bind,src=$TOOLCHAIN_DIR/provider-mirror,dst=$TOOLCHAIN_DIR/provider-mirror,readonly" \
+            --mount "type=bind,src=$TOOLCHAIN_DIR/terraform.tfrc,dst=$TOOLCHAIN_DIR/terraform.tfrc,readonly" \
+            --mount "type=bind,src=$RUN_ROOT/input,dst=/input,readonly" \
+            --mount "type=bind,src=$RAW_DIR,dst=/output" \
+            --entrypoint /usr/bin/env "$UBUNTU_IMAGE" -i \
+            PATH="$TOOLCHAIN_DIR/bin:/usr/bin:/bin" HOME=/tmp LANG=C.UTF-8 \
+            TF_CLI_CONFIG_FILE="$TOOLCHAIN_DIR/terraform.tfrc" \
+            "$pyroot/bin/python3" -I -B "$BUNDLE_DIR/runtime/scripts/prototype_v1/ci_release_verifier.py" \
+            --release "$BUNDLE_DIR" \
+            --expected-manifest-sha256 e9c723e256dfbe31ea927ad74990686b94b2f8d7831bc7c665b55ba109a73fa2 \
+            --dev-only --launch -- \
+            --terraform /input --environment dev --asset-criticality low --data-sensitivity low \
+            --output /output/gate.json > "$RUN_ROOT/gate.log" 2>&1
+          rc=$?
+          set -e
+          printf 'exit=%s\n' "$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Verify exact JSON bytes and produce a public-safe run record
+        id: report
+        if: ${{ always() && steps.workspace.outcome == 'success' }}
+        env:
+          GATE_EXIT: ${{ steps.gate.outputs.exit }}
+          PR_SHA: ${{ steps.pins.outputs.sha }}
+          CI_PR_NUMBER: ${{ steps.pins.outputs.number }}
+          PINS_OUTCOME: ${{ steps.pins.outcome }}
+          ARCHIVE_OUTCOME: ${{ steps.archive.outcome }}
+          PROVISION_OUTCOME: ${{ steps.provision.outcome }}
+          INPUT_OUTCOME: ${{ steps.input.outcome }}
+          FIXTURE: ${{ inputs.fixture }}
+        run: |
+          report="$REPORT_DIR/execution.json"
+          run_status=20
+          failure=WORKFLOW_PREPARATION
+          if [[ "$GATE_EXIT" =~ ^[0-9]{1,3}$ ]]; then
+            commit="${PR_SHA:-$GITHUB_SHA}"
+            if rc="$("$BUNDLE_DIR/runtime/.venv/bin/python" -I -B trusted-control/.github/ci_gate.py collect \
+              "$BUNDLE_DIR" "$RAW_DIR" "$GATE_EXIT" "$report" "$STARTED_UTC" "$commit" "$RUNTIME_SHA")"; then
+              case "$rc" in 0|10|20) run_status="$rc" ;; esac
+            else
+              failure=GATE_REPORT_GENERATION
+            fi
+          elif [[ "$PINS_OUTCOME" != success ]]; then failure=TRUST_OR_PR_RESOLUTION
+          elif [[ "$ARCHIVE_OUTCOME" != success ]]; then failure=RUNTIME_ACQUISITION
+          elif [[ "$PROVISION_OUTCOME" != success ]]; then failure=TOOLCHAIN_PROVISION
+          elif [[ "$INPUT_OUTCOME" != success ]]; then failure=TERRAFORM_INPUT
+          fi
+          python3 -I -B - "$report" "$failure" "$run_status" "$FIXTURE" <<'PY'
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          status = int(sys.argv[3])
+          if path.is_file():
+              record = json.loads(path.read_bytes())
+          else:
+              record = {
+                  "schema_version": "ci3b-advisory-execution-v1",
+                  "enforcement": "ADVISORY_ONLY",
+                  "started_utc": os.environ["STARTED_UTC"],
+                  "finished_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                  "github_run_id": int(os.environ["GITHUB_RUN_ID"]),
+                  "github_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                  "github_run_number": int(os.environ["GITHUB_RUN_NUMBER"]),
+                  "gate_status": None,
+                  "gate_exit_code": None,
+                  "gate_json_sha256": None,
+                  "wrapper_status": "ERROR",
+                  "wrapper_exit_code": 20,
+                  "failure_stage": sys.argv[2],
+              }
+          if os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch":
+              expected = {"pass": 0, "review": 10, "error": 20}.get(sys.argv[4], -1)
+              match = record["gate_exit_code"] == expected
+              record.update(fixture_expectation="PASS" if match else "FAIL",
+                            fixture_expected_gate_exit_code=expected)
+              if not match:
+                  status = 20
+                  record.update(wrapper_status="ERROR", wrapper_exit_code=20,
+                                failure_stage=record["failure_stage"] or "FIXTURE_EXPECTATION")
+          raw = (json.dumps(record, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
+          path.write_bytes(raw)
+          digest = hashlib.sha256(raw).hexdigest()
+          with path.with_suffix(".json.sha256").open("x", encoding="ascii") as sidecar:
+              print(f"{digest}  {path.name}", file=sidecar)
+          lines = [
+              "## Security Gate — ADVISORY_ONLY",
+              f"- Gate: {record['gate_status'] or 'not verified'} / "
+              f"{record['gate_exit_code'] if record['gate_exit_code'] is not None else 'n/a'}",
+              f"- Wrapper: {record['wrapper_status']} / {record['wrapper_exit_code']}",
+              f"- Stage: {record['failure_stage'] or 'complete'}",
+              f"- Gate JSON SHA-256: {record['gate_json_sha256'] or 'n/a'}",
+          ]
+          if "fixture_expectation" in record:
+              lines.append(f"- Fixture expectation: {record['fixture_expectation']}")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              print("\n".join(lines), file=summary)
+          final_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          if final_digest != digest:
+              raise SystemExit("Execution report checksum mismatch")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"exit={status}", file=output)
+          PY
+
+      - name: Upload the run record for PASS, REVIEW or ERROR
+        id: upload
+        if: ${{ always() && steps.workspace.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-gate-${{ steps.workspace.outputs.name }}
+          path: |
+            ${{ env.REPORT_DIR }}/execution.json
+            ${{ env.REPORT_DIR }}/execution.json.sha256
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+
+      - name: Finish with the verified advisory process status
+        if: ${{ always() }}
+        env:
+          ADVISORY_EXIT: ${{ steps.report.outputs.exit }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        run: |
+          [[ "$UPLOAD_OUTCOME" == success ]] || exit 20
+          case "$ADVISORY_EXIT" in 0|10|20) exit "$ADVISORY_EXIT" ;; *) exit 20 ;; esac
