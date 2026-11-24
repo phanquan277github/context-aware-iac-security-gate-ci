@@ -75,6 +75,8 @@ def html_report(record, result, execution_digest, export_digest):
     section("Bối cảnh triển khai", facts((key, (record.get("business_context") or {}).get(key))
                                         for key in ("environment", "asset_criticality", "data_sensitivity"))
             + facts([("context_profile_id", record.get("context_profile_id"))]))
+    if record.get("context_provenance"):
+        section("Nguồn gốc bối cảnh", facts(record["context_provenance"].items()))
     counts = record.get("counts")
     coverage = "<p>N/A</p>"
     if counts:
@@ -133,6 +135,10 @@ def markdown(record, result):
              f"- Artifact: `{record['artifact_name']}`"]
     if record.get("context_profile_id"):
         lines.append(f"- Hồ sơ ngữ cảnh: {record['context_profile_id']}")
+    provenance = record.get("context_provenance")
+    if provenance:
+        lines.extend(f"- {key}: `{display(value)}`" for key, value in provenance.items())
+        lines.append(f"- PR / commit đầu vào: {display(record.get('pr_number'))} / `{display(record.get('input_commit_sha'))}`")
     if record.get("fixture_expectation"):
         lines.append(f"- Fixture expectation: {record['fixture_expectation']}")
     if result and result["ranked_supported_findings"]:

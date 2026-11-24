@@ -63,7 +63,7 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(found, set(HOSTED))
 
     def test_context_profiles_are_dispatch_only(self):
-        choose = report.gate.trusted_context
+        choose = lambda env: report.gate.trusted_context(env)[:2]
         self.assertEqual(choose({}), ("CTX01", ("dev", "low", "low")))
         values = {"FIXTURE": "ci5", "CI_CONTEXT_PROFILE": "CTX08"}
         self.assertEqual(choose(dict(values, GITHUB_EVENT_NAME="workflow_run")),

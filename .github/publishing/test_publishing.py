@@ -92,7 +92,7 @@ class PublishingTests(unittest.TestCase):
                 path=site.insert(records,r)
                 site.build(records,Path(tmp))
                 self.assertIn(r["execution"]["gate_status"],(Path(tmp)/path).with_name("report.html").read_text())
-            history=parse((Path(tmp)/"history.json").read_bytes())
+            history=parse((Path(tmp)/"history.json").read_bytes())["records"]
             self.assertEqual(len(history),3)
             self.assertTrue(all((Path(tmp)/v["report_url"]).is_file() for v in history))
             self.assertEqual({v["gate_status"] for v in history},set(EXIT))
@@ -173,7 +173,7 @@ class PublishingTests(unittest.TestCase):
             site.publish(Path(tmp), self.r)
             self.assertEqual(push.call_count, 2)
             self.assertFalse(any("--force" in call.args[0] for call in push.call_args_list))
-            history = parse((Path(tmp) / "history.json").read_bytes())
+            history = parse((Path(tmp) / "history.json").read_bytes())["records"]
             self.assertEqual({row["gate_status"] for row in history}, {"PASS", "REVIEW"})
             self.assertTrue(all((Path(tmp) / row["report_url"]).is_file() for row in history))
 
@@ -194,6 +194,7 @@ class PublishingTests(unittest.TestCase):
                           ("newer",None),("closed",None),("fixture",None),("pages-failure","POST")]:
             with self.subTest(case=case):
                 self.e["pr_number"]=None if case=="fixture" else 7
+                self.e["trigger_event"]="workflow_dispatch" if case=="fixture" else "workflow_run"
                 who={"login":"github-actions[bot]","id":41898282}
                 comments=[]
                 if case in {"user-marker","update","newer"}:

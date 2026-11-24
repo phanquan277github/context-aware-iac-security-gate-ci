@@ -1,1 +1,67 @@
-<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'"><title>Security Gate · Lịch sử kiểm tra</title><link rel="stylesheet" href="assets/style.css"><script defer src="assets/app.js"></script></head><body><header><div><strong>Security Gate</strong> <small>ADVISORY_ONLY</small></div><nav><a href="https://github.com/phanquan277github/context-aware-iac-security-gate-ci">Repository</a> <a href="https://github.com/phanquan277github/context-aware-iac-security-gate-ci/actions">Actions ↗</a></nav></header><main><h1>Lịch sử kiểm tra Terraform</h1><p>Kết quả Checkov và thứ tự ưu tiên xử lý từ mô hình D-038 cho các đầu vào demo đã duyệt.</p><div id="stats"></div><section><h2>Lượt thực thi gần nhất</h2><p id="latest">Đang đọc lịch sử…</p><p id="coverage"></p></section><section><h2>Tra cứu báo cáo</h2><div class="filters"><label>Tìm run, commit hoặc PR<input id="search" type="search" placeholder="Run ID, SHA, #PR"></label><label>Gate<select id="status"><option value="">Tất cả</option></select></label><label>Nguồn<select id="trigger"><option value="">Tất cả</option></select></label><label>Ngữ cảnh<select id="ctx"><option value="">Tất cả</option></select></label><label>Sắp xếp<select id="sort"><option value="new">Mới nhất</option><option value="old">Cũ nhất</option></select></label></div><p id="matches" aria-live="polite"></p><div class="scroll"><table><thead><tr><th>Thời gian UTC</th><th>Gate / wrapper</th><th>Run · attempt</th><th>Nguồn / PR</th><th>Ngữ cảnh</th><th>Failed / scored / unsupported</th><th>Báo cáo</th></tr></thead><tbody id="rows"></tbody></table></div></section><section><h2>Model và runtime</h2><p id="model">Chờ dữ liệu.</p><p>Điểm ML phục vụ xếp hạng trong từng lượt quét. Finding ngoài phạm vi vẫn cần được xem xét. Phạm vi thống kê finding chỉ gồm các lượt Gate hoàn tất.</p></section></main></body></html>
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>Security Gate · Lịch sử kiểm tra</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script defer src="assets/comparison.js"></script>
+  <script defer src="assets/app.js"></script>
+</head>
+<body>
+  <header>
+    <div><strong>Security Gate</strong> <small>ADVISORY_ONLY</small></div>
+    <nav>
+      <a href="#comparison">So sánh bối cảnh</a>
+      <a href="https://github.com/phanquan277github/context-aware-iac-security-gate-ci">Repository</a>
+      <a href="https://github.com/phanquan277github/context-aware-iac-security-gate-ci/actions">Actions ↗</a>
+    </nav>
+  </header>
+  <main>
+    <h1>Lịch sử kiểm tra Terraform</h1>
+    <p>Kết quả Checkov và thứ tự ưu tiên từ mô hình D-038 cho các đầu vào demo đã duyệt.</p>
+    <div class="refresh">
+      <button id="refresh" type="button">Làm mới lịch sử</button>
+      <div id="freshness" aria-live="polite">Đang đọc lịch sử…</div>
+    </div>
+    <div id="stats"></div>
+    <section>
+      <h2>Lượt thực thi gần nhất</h2>
+      <p id="latest"></p>
+      <p id="coverage"></p>
+    </section>
+    <section>
+      <h2>Tra cứu báo cáo</h2>
+      <div class="filters">
+        <label>Tìm run, commit hoặc PR<input id="search" type="search" placeholder="Run ID, SHA, #PR"></label>
+        <label>Gate<select id="status"><option value="">Tất cả</option></select></label>
+        <label>Nguồn<select id="trigger"><option value="">Tất cả</option></select></label>
+        <label>Ngữ cảnh<select id="ctx"><option value="">Tất cả</option></select></label>
+        <label>Sắp xếp<select id="sort"><option value="new">Mới nhất</option><option value="old">Cũ nhất</option></select></label>
+      </div>
+      <p id="matches" aria-live="polite"></p>
+      <div class="scroll">
+        <table><thead><tr><th>Thời gian UTC</th><th>Gate / wrapper</th><th>Run · attempt</th><th>Nguồn / PR</th><th>Ngữ cảnh</th><th>Failed / scored / unsupported</th><th>Báo cáo</th></tr></thead>
+        <tbody id="rows"></tbody></table>
+      </div>
+    </section>
+    <section id="comparison">
+      <h2>So sánh bối cảnh</h2>
+      <p>Chọn hai lượt đánh giá cùng commit và Terraform artifact, với business context khác nhau.</p>
+      <div class="filters">
+        <label>Lượt A<select id="run-a"><option value="">Chọn lượt A</option></select></label>
+        <label>Lượt B<select id="run-b"><option value="">Chọn lượt B</option></select></label>
+      </div>
+      <div id="pair-details" class="pair"></div>
+      <p id="comparison-status" aria-live="polite">Chọn hai lượt đánh giá.</p>
+      <div id="comparison-result"></div>
+    </section>
+    <section>
+      <h2>Model và runtime</h2>
+      <p id="model"></p>
+      <p>Điểm ML phục vụ xếp hạng trong từng lượt quét. Finding ngoài phạm vi vẫn cần được xem xét. Phạm vi thống kê finding chỉ gồm các lượt Gate hoàn tất.</p>
+    </section>
+  </main>
+</body>
+</html>

@@ -13,7 +13,8 @@ from zipfile import ZipFile
 from jsonschema import Draft202012Validator
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / "reporting"))
+sys.path[:0] = [str(HERE.parent / "reporting"), str(HERE.parent)]
+import business_context as bc
 from render import html_report
 
 REPO = "phanquan277github/context-aware-iac-security-gate-ci"
@@ -29,7 +30,7 @@ EXIT = {"PASS": 0, "REVIEW": 10, "ERROR": 20}
 STAGES = ("terraform_init","terraform_validate","checkov_scan","feature_extraction","model_scoring")
 FAILURES = {None,"GATE","GATE_EXECUTION","GATE_OUTPUT_VERIFICATION","WORKFLOW_PREPARATION","CONTROL_CHECKOUT",
             "REPORT_GENERATION","FIXTURE_EXPECTATION","TRUST_OR_PR_RESOLUTION","RUNTIME_ACQUISITION",
-            "TOOLCHAIN_PROVISION","TERRAFORM_INPUT"}
+            "TOOLCHAIN_PROVISION","TERRAFORM_INPUT","BUSINESS_CONTEXT"}
 BASE = {"report.html","report.md","execution.json","execution.json.sha256","checksums.sha256"}
 FULL = BASE | {"gate-result.json","gate-result.json.sha256"}
 
@@ -101,8 +102,21 @@ def validate(e,g,scope):
     ctx=e.get("business_context")
     dev=dict(environment="dev",asset_criticality="low",data_sensitivity="low")
     prod=dict(environment="prod",asset_criticality="high",data_sensitivity="high")
-    need(ctx is None or ctx==dev or (scope=="ci5" and e.get("pr_number") is None and ctx==prod),"Context")
-    need(e.get("context_profile_id") in (None, "CTX08" if ctx==prod else "CTX01"),"Profile")
+    provenance = e.get("context_provenance")
+    if provenance is not None:
+        bc.validate_provenance(provenance, ctx, e.get("context_profile_id"), pr_number=e.get("pr_number"),
+                               input_commit=e.get("input_commit_sha"), event=e.get("trigger_event"))
+        if provenance["assessment_type"] == "fixture" and e.get("context_profile_id") == "CTX08":
+            need(scope == "ci5", "Fixture profile outside approved scope")
+    else:
+        need(ctx is None or ctx == dev or (scope == "ci5" and e.get("pr_number") is None and ctx == prod), "Legacy context")
+        need(e.get("context_profile_id") in (None, "CTX08" if ctx == prod else "CTX01"), "Legacy profile")
+    if g is not None:
+        if provenance is None:
+            need("context_provenance" not in g and "business_context" not in g, "Unexpected context export")
+        else:
+            need(g.get("context_provenance") == provenance and g.get("business_context") == ctx,
+                 "Export context provenance mismatch")
     for k,value in dict(trusted_runtime_commit_sha=RUNTIME,runtime_archive_sha256=ARCHIVE,model_sha256=MODEL,
                         deployment_model_id=MODEL_ID,manifest_sha256=MANIFEST,release_id="ci-gate-v1").items():
         need(e.get(k)==value or (g is None and e.get(k) is None),"Unexpected runtime or model")
@@ -181,5 +195,7 @@ fixture_expectation context_profile_id terraform_artifact_sha256""".split()
 def record(e,g,scope,source_sha,export_sha):
     validate(e,g,scope)
     public={k:e.get(k) for k in FIELDS}
+    if "context_provenance" in e:
+        public["context_provenance"] = e["context_provenance"]
     public["duration_seconds"]=(utc(e["finished_utc"])-utc(e["started_utc"])).total_seconds()
     return dict(repository=REPO,scope=scope,execution=public,result=g,execution_digest=source_sha,export_digest=export_sha)

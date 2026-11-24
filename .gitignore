@@ -56,3 +56,10 @@
 /dashboard/assets/*
 !/dashboard/assets/style.css
 !/dashboard/assets/app.js
+
+!/.github/business_context.py
+!/.github/publishing/test_context_assessments.py
+!/config/
+/config/*
+!/config/business-context.json
+!/dashboard/assets/comparison.js

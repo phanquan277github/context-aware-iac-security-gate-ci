@@ -42,13 +42,13 @@ Workflow yêu cầu lưu artifact **30 ngày**, tùy giới hạn của reposito
 
 Fixture [CI-5](.github/ci_gate_fixtures/ci5/main.tf) là Terraform tổng hợp dùng để trình diễn kiểm tra tĩnh. Fixture sạch dùng lại [PASS](.github/ci_gate_fixtures/pass/main.tf).
 
-Khi PR trong cùng repository nhắm vào `main` và thay đổi `terraform/**`, workflow **Security Gate PR signal** báo sự kiện cho workflow **Security Gate advisory** chạy từ nhánh mặc định. PR dùng `CTX01` (`dev / low / low`). Mở artifact theo hướng dẫn trên và đối chiếu `execution.json.pr_number`, `input_commit_sha` và `scanned_commit_sha` với PR head. Khi push bản sửa vào cùng nhánh PR, kiểm tra run mới và lưu artifact lần trước vào thư mục riêng trước khi so sánh. GitHub yêu cầu payload `workflow_run` chỉ ra đúng một PR cùng repository để bước xác minh có thể tiếp tục.
+Khi PR trong cùng repository nhắm vào `main` và thay đổi `terraform/**`, workflow **Security Gate PR signal** báo sự kiện cho workflow **Security Gate advisory** chạy từ nhánh mặc định. PR tự động đọc [cấu hình workload](config/business-context.json) từ commit điều khiển trên `main`. Cấu hình ban đầu là `dev / low / low` (CTX01). Mở artifact theo hướng dẫn trên và đối chiếu `execution.json.pr_number`, `input_commit_sha` và `scanned_commit_sha` với PR head. Khi push bản sửa vào cùng nhánh PR, kiểm tra run mới và lưu artifact lần trước vào thư mục riêng trước khi so sánh. GitHub yêu cầu payload `workflow_run` chỉ ra đúng một PR cùng repository để bước xác minh có thể tiếp tục.
 
 Để so sánh hai bối cảnh với cùng đầu vào, vào **Actions → Security Gate advisory → Run workflow** trên `main`, chọn fixture `ci5` và lần lượt chọn `CTX01` (`dev / low / low`) và `CTX08` (`prod / high / high`). So sánh hai artifact có cùng `terraform_artifact_sha256`, model SHA-256, runtime commit và finding IDs. `context_profile_id` ghi profile đã chọn. Các score và rank trong `gate-result.json` dùng để trình diễn suy luận vận hành. Mức thay đổi score có thể khác nhau giữa các finding. Luồng PR giữ chế độ `ADVISORY_ONLY`.
 
 ## Dashboard và phản hồi PR (CI-4E)
 
-Publisher nhận sự kiện hoàn tất của **Security Gate advisory**, bao gồm REVIEW và ERROR. Quyền công bố giới hạn ở các fixture tổng hợp trong [demo-scope.json](.github/publishing/demo-scope.json). Với PR, phải đối chiếu được signal và commit thuộc cùng repository; thư mục `terraform/` tại commit đó phải chứa đúng blob `main.tf` đã duyệt. Với fixture dispatch, publisher kiểm blob ở revision điều khiển. Thiếu bằng chứng sẽ bỏ qua hoặc báo lỗi ở publisher; artifact CI-4 vẫn theo quy trình Gate.
+Publisher nhận sự kiện hoàn tất của **Security Gate advisory**, bao gồm REVIEW và ERROR. Quyền công bố giới hạn ở các fixture tổng hợp trong [demo-scope.json](.github/publishing/demo-scope.json). Với PR tự động, phải đối chiếu được signal thuộc cùng repository. Với PR giả định, publisher xác minh PR và SHA đã pin dựa trên provenance của Gate trên `main`. Với cả hai, thư mục `terraform/` tại commit đó phải chứa đúng blob `main.tf` đã duyệt. Với fixture dispatch, publisher kiểm blob ở revision điều khiển. Thiếu bằng chứng sẽ bỏ qua hoặc báo lỗi ở publisher; artifact CI-4 vẫn theo quy trình Gate.
 
 ### Bật Pages và kiểm thử
 
@@ -58,9 +58,44 @@ Publisher nhận sự kiện hoàn tất của **Security Gate advisory**, bao g
 4. Mở PR demo CI-5 từ cùng repository. Đối chiếu SHA trong comment bot với head của PR. Push bản remediated lên cùng PR, chờ báo cáo mới và kiểm comment được cập nhật tại chỗ. Mỗi kết quả có run/attempt riêng. Khi Pages deploy lỗi, comment dẫn đến Actions run. Nếu chủ repo thiết lập custom domain, đối chiếu và cập nhật hằng `SITE` trong publisher trước khi sử dụng liên kết công khai.
 5. Khi bỏ lỡ một lượt hoặc upload/deploy lỗi, dispatch publisher trên `main` với `source_run` và `source_attempt` chính xác khi artifact còn tải được. Để riêng `source_run` trống nếu chỉ cần deploy lại các báo cáo đã lưu. Không cần chạy lại Gate.
 
-Nhánh `gh-pages` dành riêng cho nội dung sinh tự động. Mỗi lần chạy xác minh record, giữ báo cáo cũ, xây lại chỉ mục rồi push fast-forward. Nhóm concurrency chung tuần tự hóa lưu trữ, deploy và comment. GitHub cho phép tối đa 100 lượt chờ với `queue: max`. Lịch sử tăng theo số attempt; chủ repo có thể sao lưu và chủ động loại bỏ cả thư mục attempt được chọn, sau đó chạy rebuild. Phiên bản renderer mới làm thay đổi HTML đã lưu sẽ bị từ chối để tránh sửa ngầm bằng chứng. Quyền ghi lên nhánh lịch sử và nhánh mặc định là một phần của ranh giới tin cậy.
+Nhánh `gh-pages` dành riêng cho nội dung sinh tự động. Mỗi lần chạy xác minh record, giữ báo cáo cũ, xây lại chỉ mục rồi push fast-forward. Nhóm concurrency chung tuần tự hóa lưu trữ, deploy và comment. GitHub cho phép tối đa 100 lượt chờ với `queue: max`. Lịch sử tăng theo số attempt; chủ repo có thể sao lưu và chủ động loại bỏ cả thư mục attempt được chọn, sau đó chạy rebuild. Dashboard mới dùng lại nguyên bytes của HTML lịch sử, kể cả khi renderer cho báo cáo mới thay đổi. Quyền ghi lên nhánh lịch sử và nhánh mặc định là một phần của ranh giới tin cậy.
 
 Dashboard dùng tệp tĩnh và tải `history.json` qua HTTP. Bản mẫu cục bộ có thể xem bằng `python3 -m http.server 8765 --bind 127.0.0.1 --directory docs/ci4e_acceptance/preview`, sau đó mở `http://127.0.0.1:8765/`. Mẫu nội bộ dùng metadata CI-4 để kiểm giao diện; việc thêm lịch sử công khai bắt đầu từ các lượt Gate có provenance CI-4E.
+
+
+## Business context và so sánh (CI-5C)
+
+| Loại đánh giá | Nguồn business context | Cập nhật comment chính thức |
+|---|---|---|
+| PR tự động | `config/business-context.json` tại commit điều khiển trên `main` | Có, nếu input thuộc phạm vi công bố và PR head còn khớp |
+| PR giả định | `workflow_dispatch` trên `main` với tuple và head SHA được chọn | Chỉ xuất artifact và báo cáo Dashboard nếu đủ điều kiện |
+| Fixture | `context_profile`, mặc định CTX01. CTX08 dùng với fixture `ci5` | Chỉ xuất artifact và báo cáo Dashboard nếu đủ điều kiện |
+
+D-039 dùng `dev/prod` cho `environment`, `low/high` cho `asset_criticality` và `data_sensitivity`. Chủ workload cập nhật đúng ba trường trên `main`. Các đánh giá tự động tiếp theo đọc revision mới. Muốn đánh giá lại PR đang mở, cần một sự kiện PR đủ điều kiện. Config sai hoặc thiếu sinh diagnostic `BUSINESS_CONTEXT` với wrapper ERROR/20. Trang công khai giữ các báo cáo đã được công bố.
+
+Đánh giá giả định xác minh PR còn mở và thuộc cùng repository, nhắm `main`, cùng SHA với `expected_head_sha` trước khi checkout. Context được truyền trực tiếp tới Gate D-039 từ workflow tin cậy. Execution và Gate export có `context_provenance` phiên bản `ci5c-context-v1`, gồm loại đánh giá, nguồn context, revision điều khiển, hash config khi có và pin của PR giả định. Report ghi các giá trị context thật và profile tương ứng. Hạn chế công bố ở đúng blob demo trong allowlist hiện tại áp dụng cho cả ba loại.
+
+Mục **So sánh bối cảnh** yêu cầu cùng artifact Terraform và commit đã quét, cùng runtime/model và schema tương thích, hai scan chấm điểm hoàn tất và context khác nhau. Đối chiếu `finding_id` một-một và đặc trưng kỹ thuật. Finding ngoài phạm vi hiển thị riêng với điểm/hạng trống. Số điểm thay đổi dùng ngưỡng tuyệt đối `1e-12` trên số gốc. Hạng và tie lấy từ export. Điểm ưu tiên có thể tăng hoặc giảm khi bối cảnh thay đổi.
+
+Dashboard kiểm lịch sử lúc mở trang, khi bấm **Làm mới lịch sử**, sau mỗi 60 giây khi tab hiển thị và khi trở lại tab. Timestamp kiểm thành công là giờ trình duyệt. Timestamp sinh lịch sử theo bản được phục vụ. Khi lỗi tải, giữ bản hợp lệ cuối. Các asset mới dùng tên chứa SHA-256, và các báo cáo đã công bố giữ URL/bytes.
+
+### Nghiệm thu hosted trên PR #2
+
+Sau khi đưa CI-5C lên `main`, chạy các lệnh sau từ gốc repo. Hai dispatch PR dùng chung một SHA. Nếu PR head đổi giữa hai lệnh, lượt sau phải từ chối và sinh báo cáo chẩn đoán.
+
+```bash
+gh workflow run publish-security-report.yml --ref main
+head_sha="$(gh pr view 2 --json headRefOid --jq .headRefOid)"
+test -n "$head_sha"
+gh workflow run security-gate.yml --ref main -f mode=on_demand_pr \
+  -f pr_number=2 -f expected_head_sha="$head_sha" \
+  -f environment=dev -f asset_criticality=low -f data_sensitivity=low
+gh workflow run security-gate.yml --ref main -f mode=on_demand_pr \
+  -f pr_number=2 -f expected_head_sha="$head_sha" \
+  -f environment=prod -f asset_criticality=high -f data_sensitivity=high
+```
+
+Kiểm hai report mới xuất hiện trên dashboard, mở so sánh, đối chiếu 7 failed, 4 scored, 3 unsupported, 4 score thay đổi và 0 rank thay đổi. So sánh comment chính thức trước/sau hai lần dispatch. Sau đó kiểm luồng tự động bằng sự kiện PR đủ điều kiện trong lúc thay đổi config trên `main`. Xác minh Job Summary, config SHA, model input và score của lượt mới, rồi đưa config về context dự định trước khi tiếp tục CI5-T04 trên PR #2. Giữ advisory mode trong suốt nghiệm thu.
 
 ## Nguồn và ghi công cho runtime `ci-gate-v1`
 

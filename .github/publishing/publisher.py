@@ -9,7 +9,7 @@ import sys
 import urllib.request as http
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from records import DEMO, REPO, SITE, digest, need, package, parse, positive, record, utc
+from records import bc, DEMO, REPO, SITE, digest, need, package, parse, positive, record, utc
 
 MARK = "<!-- context-aware-iac-security-gate -->"
 GATE = ".github/workflows/security-gate.yml"
@@ -49,26 +49,61 @@ def accepted_run(run,number,attempt,workflow_id):
          re.fullmatch("[0-9a-f]{40}",run["head_sha"]),"Untrusted Gate run")
 
 
+def validate_context_origin(e, run):
+    info = e.get("context_provenance")
+    if info is None:
+        if run["event"] == "workflow_run":
+            need(e.get("business_context") == dict(environment="dev", asset_criticality="low", data_sensitivity="low"),
+                 "Legacy PR context")
+        return
+    bc.validate_provenance(info, e.get("business_context"), e.get("context_profile_id"),
+                           pr_number=e.get("pr_number"), input_commit=e.get("input_commit_sha"), event=run["event"])
+    revision = info["control_revision"]
+    need(revision == run["head_sha"], "Context revision differs from trusted Gate run")
+    if info["assessment_type"] == "automatic_pr":
+        file = api(f"contents/{bc.CONFIG}?ref={revision}")
+        need(file["type"] == "file" and file["encoding"] == "base64" and 0 < file["size"] <= 4096,
+             "Unexpected trusted context file")
+        raw = base64.b64decode("".join(file["content"].splitlines()), validate=True)
+        need(len(raw) == file["size"] and digest(raw) == info["configuration_sha256"]
+             and bc.values(parse(raw)) == bc.values(e["business_context"]), "Trusted context differs from GitHub blob")
+
+
 def get_scope(e,run):
-    if run["event"]=="workflow_dispatch":
+    info = e.get("context_provenance") or {}
+    manual_pr = info.get("assessment_type") == "on_demand_pr"
+    if run["event"] == "workflow_dispatch" and not manual_pr:
         need(e.get("pr_number") is None and e.get("input_commit_sha") in (None,run["head_sha"]),"Fixture provenance")
         name=e.get("publication_fixture")
         if name not in {"pass","review","error","ci5"}:
             return None
         file=api(f"contents/.github/ci_gate_fixtures/{name}/main.tf?ref={run['head_sha']}")
         return name if file["sha"]==DEMO[name]["blob"] else None
-    pr=e.get("pr_number")
-    signal=e.get("signal_run_id")
-    if not positive(pr) or not positive(signal):
+    pr = e.get("pr_number")
+    sha = e.get("input_commit_sha") or ""
+    if not positive(pr) or not re.fullmatch("[0-9a-f]{40}", sha):
         return None
-    source=api(f"actions/runs/{signal}")
-    sha=e["input_commit_sha"]
-    need(re.fullmatch("[0-9a-f]{40}",sha) and source["event"]=="pull_request" and source["conclusion"]=="success" and
-         source["path"]==SIGNAL and source["head_sha"]==sha and source["head_repository"]["full_name"]==REPO and
-         source["workflow_id"]==api("actions/workflows/security-gate-pr.yml")["id"],"PR signal identity")
-    need(any(x["number"]==pr and x["head"]["sha"]==sha and x["base"]["ref"]=="main" and
-             x["head"]["repo"]["id"]==x["base"]["repo"]["id"]==run["repository"]["id"]
-             for x in source["pull_requests"]),"PR association")
+    if manual_pr:
+        need(run["event"] == "workflow_dispatch" and sha == info["expected_head_sha"]
+             and e.get("signal_run_id") is None and e.get("publication_fixture") is None,
+             "Manual PR provenance")
+        current = api(f"pulls/{pr}")
+        # The trusted Gate resolved an open PR and pinned SHA before checkout. The head may
+        # advance before publication or recovery. Inspect the evaluated commit's tree below.
+        need(current["number"] == pr and current["base"]["ref"] == "main"
+             and all((current[side].get("repo") or {}).get("id") == run["repository"]["id"]
+                     for side in ("head", "base")), "Manual PR association")
+    else:
+        signal = e.get("signal_run_id")
+        if not positive(signal):
+            return None
+        source = api(f"actions/runs/{signal}")
+        need(source["event"]=="pull_request" and source["conclusion"]=="success" and source["path"]==SIGNAL
+             and source["head_sha"]==sha and source["head_repository"]["full_name"]==REPO
+             and source["workflow_id"]==api("actions/workflows/security-gate-pr.yml")["id"],"PR signal identity")
+        need(any(x["number"]==pr and x["head"]["sha"]==sha and x["base"]["ref"]=="main" and
+                 x["head"]["repo"]["id"]==x["base"]["repo"]["id"]==run["repository"]["id"]
+                 for x in source["pull_requests"]),"PR association")
     tree=api("git/trees/"+sha)
     dirs=[x for x in tree["tree"] if x["path"]=="terraform" and x["type"]=="tree"]
     if tree["truncated"] or len(dirs)!=1:
@@ -115,10 +150,9 @@ def ingest(number,attempt):
     need(export==e.get("gate_result_sha256"),"Export checksum")
     if e.get("trigger_event") is None and g is None:
         e["trigger_event"]=run["event"]
-    if e["trigger_event"]=="workflow_run":
-        need(e.get("business_context")==dict(environment="dev",asset_criticality="low",data_sensitivity="low"),"PR context")
+    validate_context_origin(e, run)
     result=record(e,g,scope,digest(data["execution.json"]),export)
-    outputs(ready="yes",payload=packed(result),pr=e.get("pr_number") or "")
+    outputs(ready="yes", payload=packed(result), pr=(e.get("pr_number") or "") if official_pr(e) else "")
 
 
 def comment_body(r,online):
@@ -130,6 +164,9 @@ def comment_body(r,online):
            "Bối cảnh: "+" / ".join(ctx.get(k,"N/A") for k in ("environment","asset_criticality","data_sensitivity")),
            "Failed / scored / unsupported / unscorable: "+" / ".join(str(counts.get(k,"N/A")) for k in
            ("failed_findings_total","supported_findings","unsupported_findings","unscorable_findings"))]
+    if e.get("context_provenance"):
+        info = e["context_provenance"]
+        lines.append(f"Bối cảnh chính thức · {e['context_profile_id']} · cấu hình `{info['configuration_sha256']}` tại commit `{info['control_revision']}`")
     if g and (g["ranked_supported_findings"] or g["unsupported_findings"]):
         lines+=["","| Hạng | Rule | Severity D-022 | Score | Phân loại |","|---:|---|---:|---:|---|"]
         for row in g["ranked_supported_findings"][:5]+g["unsupported_findings"][:3]:
@@ -142,9 +179,14 @@ def comment_body(r,online):
     return "\n\n".join(lines[:5])+"\n"+"\n".join(lines[5:])
 
 
+def official_pr(e):
+    info = e.get("context_provenance")
+    return info["assessment_type"] == "automatic_pr" if info is not None else e.get("trigger_event") == "workflow_run"
+
+
 def feedback(r,online,call=api):
     e=r["execution"];pr=e["pr_number"]
-    if pr is None:
+    if pr is None or not official_pr(e):
         return
     matches=[]
     page=1

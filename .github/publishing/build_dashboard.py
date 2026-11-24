@@ -1,9 +1,9 @@
 """Build from verified records; read historical blobs with Git plumbing, never checkout gh-pages."""
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +14,7 @@ from publisher import unpack_env
 
 KEY=re.compile(r"reports/([1-9][0-9]{0,19})/attempt-([1-9][0-9]{0,19})/record.json")
 ASSETS=HERE.parent.parent/"dashboard"
+STATIC_ASSET = re.compile(r"assets/(style(?:\.[a-f0-9]{64})?\.css|(?:app|comparison)(?:\.[a-f0-9]{64})?\.js)")
 
 
 def canonical(obj):
@@ -33,21 +34,43 @@ def insert(records,r):
     return path
 
 
-def build(records,site):
+def build(records, site, historical_html=None, previous_index=None, historical_assets=None):
     site.mkdir(exist_ok=True)
-    for f in ("index.html","assets/style.css","assets/app.js"):
-        (site/f).parent.mkdir(exist_ok=True)
-        shutil.copyfile(ASSETS/f,site/f)
-    history=[]
-    for key,r in sorted(records.items()):
-        e=r["execution"];dst=site/key
-        dst.parent.mkdir(parents=True,exist_ok=True)
+    historical_html = historical_html or {}
+    asset_dir = site / "assets"
+    asset_dir.mkdir(exist_ok=True)
+    for name, data in (historical_assets or {}).items():
+        (site / name).write_bytes(data)
+    assets = {}
+    index = (ASSETS / "index.html").read_text(encoding="utf-8")
+    for name in ("assets/style.css", "assets/comparison.js", "assets/app.js"):
+        data = (ASSETS / name).read_bytes()
+        assets[name] = digest(data)
+        stem, extension = name.rsplit(".", 1)
+        versioned_name = f"{stem}.{assets[name]}.{extension}"
+        index = index.replace(f'"{name}"', f'"{versioned_name}"')
+        (site / versioned_name).write_bytes(data)
+    (site / "index.html").write_text(index, encoding="utf-8")
+    history = []
+    for key, r in sorted(records.items()):
+        e = r["execution"]
+        dst = site / key
+        dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(canonical(r))
-        dst.with_name("report.html").write_text(html_report(e,r["result"],r["execution_digest"],r["export_digest"]))
-        history.append({**e,"report_url":key.replace("record.json","report.html"),
-                        "actions_url":f"https://github.com/{REPO}/actions/runs/{e['github_run_id']}/attempts/{e['github_run_attempt']}"})
-    history.sort(key=lambda e:(e["started_utc"],e["github_run_id"],e["github_run_attempt"]),reverse=True)
-    (site/"history.json").write_bytes(canonical(history))
+        html = historical_html.get(key)
+        if html is None:
+            html = html_report(e, r["result"], r["execution_digest"], r["export_digest"]).encode()
+        dst.with_name("report.html").write_bytes(html)
+        history.append({**e, "report_url": key.replace("record.json", "report.html"),
+                        "actions_url": f"https://github.com/{REPO}/actions/runs/{e['github_run_id']}/attempts/{e['github_run_attempt']}"})
+    history.sort(key=lambda e: (e["started_utc"], e["github_run_id"], e["github_run_attempt"]), reverse=True)
+    fingerprint = digest(canonical({"history": history, "assets": assets, "index": digest(index.encode())}))
+    if isinstance(previous_index, dict) and previous_index.get("content_sha256") == fingerprint:
+        generated = previous_index["generated_utc"]
+    else:
+        generated = datetime.now(timezone.utc).isoformat()
+    (site / "history.json").write_bytes(canonical(dict(schema_version="ci5c-history-v1",
+        generated_utc=generated, content_sha256=fingerprint, records=history)))
 
 
 def git(*args,env=None,data=None):
@@ -77,11 +100,21 @@ def publish(site,new):
             git("fetch","--quiet","origin","refs/heads/gh-pages")
             ref=git("rev-parse","FETCH_HEAD").decode().strip()
         records,original=snapshot(ref)
-        if new is not None: insert(records,new)
-        build(records,site)
+        historical_html = {}
+        for key in records:
+            html_path = key.replace("record.json", "report.html")
+            need(html_path in original or not ref, "Missing historical report")
+            if html_path in original:
+                historical_html[key] = git("cat-file", "blob", original[html_path])
+        previous_index = parse(git("cat-file", "blob", original["history.json"])) if "history.json" in original else None
+        historical_assets = {path: git("cat-file", "blob", oid) for path, oid in original.items()
+                             if STATIC_ASSET.fullmatch(path)}
+        if new is not None:
+            insert(records, new)
+        build(records, site, historical_html, previous_index, historical_assets)
         for path,oid in original.items():
             need((site/path).is_file(),"Unrecognized storage path")
-            if KEY.fullmatch(path) or path.endswith("/report.html"):
+            if KEY.fullmatch(path) or path.endswith("/report.html") or STATIC_ASSET.fullmatch(path):
                 need(git("hash-object",str(site/path)).strip()==oid,"Existing report would change")
         with tempfile.TemporaryDirectory() as tmp:
             gitdir=git("rev-parse","--absolute-git-dir").decode().strip()

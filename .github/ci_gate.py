@@ -13,6 +13,10 @@ import subprocess
 import sys
 import tarfile
 from io import BytesIO
+from urllib.request import Request, urlopen
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import business_context as bc
 
 
 RELEASE_ID = "ci-gate-v1"
@@ -27,7 +31,7 @@ VERIFIER = "runtime/scripts/prototype_v1/ci_release_verifier.py"
 EXIT = {0: "PASS", 10: "REVIEW", 20: "ERROR"}
 CONTROL = Path(__file__).resolve().parent
 FIXTURES = {"pass": 0, "review": 10, "error": 20, "ci5": 10}
-CONTEXT_KEYS = ("environment", "asset_criticality", "data_sensitivity")
+CONTEXT_KEYS = bc.KEYS
 CONTEXT_PROFILES = {"CTX01": ("dev", "low", "low"), "CTX08": ("prod", "high", "high")}
 SHA40 = re.compile("[0-9a-f]{40}")
 SHA64 = re.compile("[0-9a-f]{64}")
@@ -218,17 +222,84 @@ def resolve_pr():
     print(f"number={pr['number']}")
 
 
+def assessment_type(env):
+    if env.get("GITHUB_EVENT_NAME") == "workflow_run":
+        return "automatic_pr"
+    if env.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        mode = env.get("CI_ASSESSMENT_MODE") or "fixture"
+        require(mode in {"fixture", "on_demand_pr"}, "Unsupported assessment mode")
+        return mode
+    return None
+
+
 def trusted_context(env):
-    if env.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
-        return "CTX01", CONTEXT_PROFILES["CTX01"]
-    profile = env.get("CI_CONTEXT_PROFILE") or "CTX01"
-    require(profile in CONTEXT_PROFILES and (profile == "CTX01" or env.get("FIXTURE") == "ci5"),
-            "Context profile is not allowed for this fixture")
-    return profile, CONTEXT_PROFILES[profile]
+    kind = assessment_type(env)
+    revision = env.get("GITHUB_SHA", "")
+    if kind == "automatic_pr":
+        data = regular(CONTROL.parent / bc.CONFIG, 4096)
+        context = bc.values(strict_json(data))
+        info = bc.provenance(kind, revision, config_sha=sha(data))
+    elif kind == "on_demand_pr":
+        context = bc.values({k: env.get("CI_INPUT_" + k.upper()) for k in CONTEXT_KEYS})
+        expected = env.get("CI_EXPECTED_HEAD", "")
+        require(SHA40.fullmatch(expected), "Expected PR head must be a full lowercase SHA")
+        info = bc.provenance(kind, revision, expected_head=expected)
+    elif kind == "fixture":
+        profile = env.get("CI_CONTEXT_PROFILE") or "CTX01"
+        require(profile in CONTEXT_PROFILES and (profile == "CTX01" or env.get("FIXTURE") == "ci5"),
+                "Context profile is not allowed for this fixture")
+        context = CONTEXT_PROFILES[profile]
+        info = bc.provenance(kind, revision)
+    else:
+        context = CONTEXT_PROFILES["CTX01"]
+        info = None
+    # Direct local regression invocations may omit GitHub metadata.
+    return bc.PROFILES[context], context, info if SHA40.fullmatch(revision) else None
+
+
+def pr_from_api(pr, repo, expected, number):
+    require(pr.get("number") == number and pr.get("state") == "open"
+            and type(repo.get("id")) is int
+            and (pr["head"].get("repo") or {}).get("id") == repo["id"]
+            and (pr["base"].get("repo") or {}).get("id") == repo["id"]
+            and pr["base"].get("ref") == "main",
+            "Expected an open same-repository PR targeting main")
+    require(pr["head"].get("sha") == expected, "Pinned PR head no longer matches")
+    return expected, number
+
+
+def resolve_manual_pr(env, fetch=None):
+    require(env.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and env.get("GITHUB_REF") == "refs/heads/main",
+            "On-demand PR assessments require main")
+    number = env.get("CI_INPUT_PR", "")
+    expected = env.get("CI_EXPECTED_HEAD", "")
+    require(re.fullmatch(r"[1-9][0-9]{0,9}", number) and SHA40.fullmatch(expected),
+            "Enter a valid PR number and full lower-case head SHA")
+    event = strict_json(regular(Path(env["GITHUB_EVENT_PATH"])))
+    repo = event["repository"]
+    full_name = repo["full_name"]
+    require(repo["default_branch"] == "main" and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", full_name)
+            and env.get("GITHUB_REPOSITORY") == full_name, "Unexpected PR repository")
+    if fetch is None:
+        def fetch(path):
+            req = Request("https://api.github.com/repos/" + full_name + "/" + path,
+                          headers={"Accept": "application/vnd.github+json"})
+            req.add_unredirected_header("Authorization", "Bearer " + env["GH_TOKEN"])
+            with urlopen(req, timeout=30) as response:
+                data = response.read(1_000_001)
+            require(len(data) <= 1_000_000, "Oversized GitHub PR response")
+            return strict_json(data)
+    return pr_from_api(fetch("pulls/" + number), repo, expected, int(number))
+
+
+def manual_pr_outputs():
+    commit, number = resolve_manual_pr(os.environ)
+    print(f"sha={commit}")
+    print(f"number={number}")
 
 
 def context_outputs():
-    _, context = trusted_context(os.environ)
+    _, context, _ = trusted_context(os.environ)
     for key, value in zip(CONTEXT_KEYS, context):
         print(f"{key}={value}")
 
@@ -279,7 +350,12 @@ def result_counts(document):
 
 def collect_record(args, env=None):
     env = os.environ if env is None else env
-    profile, context = trusted_context(env)
+    context_error = False
+    try:
+        profile, context, provenance = trusted_context(env)
+    except (OSError, ValueError, TypeError, KeyError):
+        profile = context = provenance = None
+        context_error = True
     document = None
     def numeric(name):
         value = env.get(name, "")
@@ -301,7 +377,7 @@ def collect_record(args, env=None):
         "release_id": RELEASE_ID,
         "manifest_sha256": MANIFEST_SHA,
         "model_sha256": MODEL_SHA,
-        "business_context": dict(zip(CONTEXT_KEYS, context)),
+        "business_context": dict(zip(CONTEXT_KEYS, context)) if context else None,
         "context_profile_id": profile,
         "gate_status": None,
         "gate_exit_code": None,
@@ -312,8 +388,16 @@ def collect_record(args, env=None):
         "gate_json_sha256": None,
         "counts": None,
     }
+    if provenance is not None and (provenance["assessment_type"] == "fixture" or result["pr_number"] is not None):
+        result["context_provenance"] = provenance
+    if context_error:
+        result["failure_stage"] = "BUSINESS_CONTEXT"
+        return result, None
     try:
         require(args.exit in EXIT, "Gate process did not return a supported exit code")
+        if provenance and provenance["assessment_type"] == "on_demand_pr":
+            require(provenance["expected_head_sha"] == input_commit and result["pr_number"] is not None,
+                    "Evaluated commit differs from the on-demand PR pin")
         checksum, verified = verified_document(args.bundle, args.raw, args.exit, profile, context)
         counts, scan_complete = result_counts(verified)
         document = verified
@@ -349,6 +433,7 @@ def main():
         "collect": (("bundle", Path), ("raw", Path), ("exit", int), ("report", Path),
                     ("start", str), ("commit", str), ("runtime_sha", str)),
         "resolve-pr": (),
+        "resolve-manual-pr": (),
         "context": (),
     }
     for name, arguments in spec.items():
@@ -357,7 +442,8 @@ def main():
             command.add_argument(argument, type=kind, **({"choices": FIXTURES} if argument == "name" else {}))
     args = parser.parse_args()
     runners = {"pack": pack, "unpack": unpack, "stage": prepare_input, "fixture": fixture,
-               "provision": toolchain_steps, "resolve-pr": resolve_pr, "context": context_outputs}
+               "provision": toolchain_steps, "resolve-pr": resolve_pr,
+               "resolve-manual-pr": manual_pr_outputs, "context": context_outputs}
     if args.command == "collect":
         collect(args)
         return

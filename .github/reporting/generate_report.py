@@ -38,7 +38,7 @@ def history_name(record):
     return f"security-gate-{utc(record['started_utc']):%Y%m%dT%H%M%SZ}_run-{run}_attempt-{attempt}"
 
 
-def public_result(doc, raw_digest, bundle, fixture):
+def public_result(doc, raw_digest, bundle, fixture, provenance=None):
     runtime = bundle / "runtime"
     severity = gate.regular(runtime / "results/main_benchmark/severity_mapping_v1.csv").decode()
     titles = {r["check_id"]: r["check_name"] for r in csv.DictReader(io.StringIO(severity))}
@@ -79,6 +79,9 @@ def public_result(doc, raw_digest, bundle, fixture):
         "ranked_supported_findings": sorted(scored, key=lambda r: (r["priority_rank_expected"], r["finding_id"])),
         "unsupported_findings": [finding(row, False) for row in doc["unsupported_findings"]],
     }
+    if provenance is not None:
+        result["context_provenance"] = provenance
+        result["business_context"] = {key: doc["business_context"][key] for key in gate.CONTEXT_KEYS}
     # jsonschema is already pinned in the CI-3B0 venv. Bootstrap diagnostics use stdlib only.
     from jsonschema import Draft202012Validator
     validator = Draft202012Validator(json.loads((HERE / "gate-result-v1.schema.json").read_bytes()))
@@ -89,12 +92,16 @@ def public_result(doc, raw_digest, bundle, fixture):
 def prepare(args, env):
     record, doc = gate.collect_record(args, env)
     event = env.get("GITHUB_EVENT_NAME")
-    fixture = env.get("FIXTURE") if event == "workflow_dispatch" else None
+    try:
+        fixture_mode = gate.assessment_type(env) == "fixture"
+    except ValueError:
+        fixture_mode = False
+    fixture = env.get("FIXTURE") if fixture_mode else None
     if doc is None and args.exit < 0:
         record["process_exit_code"] = None
         for variable, stage in (("PINS_OUTCOME", "TRUST_OR_PR_RESOLUTION"), ("ARCHIVE_OUTCOME", "RUNTIME_ACQUISITION"),
                                 ("PROVISION_OUTCOME", "TOOLCHAIN_PROVISION"), ("INPUT_OUTCOME", "TERRAFORM_INPUT")):
-            if env.get(variable) != "success":
+            if env.get(variable) != "success" and record["failure_stage"] != "BUSINESS_CONTEXT":
                 record["failure_stage"] = stage
                 break
     record["publication_fixture"] = fixture if fixture in gate.FIXTURES else None
@@ -118,7 +125,7 @@ def prepare(args, env):
     )
     if not verified_archive:
         record.update(model_sha256=None, manifest_sha256=None)
-    if event == "workflow_dispatch":
+    if fixture_mode:
         expected = gate.FIXTURES.get(fixture)
         matched = expected is not None and expected == record["gate_exit_code"]
         record.update(fixture_expected_gate_exit_code=expected, fixture_expectation="PASS" if matched else "FAIL")
@@ -157,7 +164,8 @@ def generate(args, env):
     record, doc = prepare(args, env)
     try:
         result = public_result(doc, record["gate_json_sha256"], args.bundle,
-                               env.get("GITHUB_EVENT_NAME") == "workflow_dispatch") if doc is not None else None
+                               gate.assessment_type(env) == "fixture",
+                               record.get("context_provenance")) if doc is not None else None
         files = file_set(record, result)
     except (ValueError, OSError, KeyError, TypeError, OverflowError, RuntimeError, ImportError):
         record.update(wrapper_status="ERROR", wrapper_exit_code=20, failure_stage="REPORT_GENERATION")
@@ -182,7 +190,8 @@ def main():
     args.bundle, args.raw = Path(env["BUNDLE_DIR"]), Path(env["RAW_DIR"])
     args.start = env["STARTED_UTC"]
     args.runtime_sha = env.get("RUNTIME_SHA", "")
-    args.commit = env.get("PR_SHA") if env.get("GITHUB_EVENT_NAME") == "workflow_run" else env.get("GITHUB_SHA")
+    args.commit = (env.get("GITHUB_SHA") if env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                   and env.get("CI_ASSESSMENT_MODE", "") in ("", "fixture") else env.get("PR_SHA"))
     args.commit = args.commit or ""
     code = env.get("GATE_EXIT", "")
     args.exit = int(code) if re.fullmatch("[0-9]{1,3}", code) else -1

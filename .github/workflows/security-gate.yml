@@ -6,11 +6,37 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
+      mode:
+        description: Fixture or hypothetical assessment of a pinned PR
+        type: choice
+        options: [fixture, on_demand_pr]
+        default: fixture
+      pr_number:
+        description: PR number (on_demand_pr only)
+        type: string
+      expected_head_sha:
+        description: Exact 40-character PR head SHA (on_demand_pr only)
+        type: string
+      environment:
+        description: Hypothetical environment
+        type: choice
+        options: [dev, prod]
+        default: dev
+      asset_criticality:
+        description: Hypothetical asset criticality
+        type: choice
+        options: [low, high]
+        default: low
+      data_sensitivity:
+        description: Hypothetical data sensitivity
+        type: choice
+        options: [low, high]
+        default: low
       fixture:
         description: Trusted synthetic Terraform fixture
         type: choice
         options: [pass, review, error, ci5]
-        required: true
+        default: pass
       context_profile:
         description: Trusted business context (CTX08 is limited to ci5)
         type: choice
@@ -26,8 +52,9 @@ jobs:
     if: >-
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
       (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' &&
-       github.ref_name == github.event.repository.default_branch)
+       github.ref_name == 'main' && github.event.repository.default_branch == 'main')
     runs-on: ubuntu-24.04
+    permissions: {contents: read, pull-requests: read}
     timeout-minutes: 40
     defaults:
       run:
@@ -36,6 +63,12 @@ jobs:
       RUNTIME_SHA: ${{ vars.CI_GATE_RUNTIME_SHA }}
       RUNTIME_ARCHIVE_SHA: ${{ vars.CI_GATE_RUNTIME_ARCHIVE_SHA256 }}
       UBUNTU_IMAGE: ${{ vars.CI_GATE_UBUNTU_IMAGE }}
+      CI_ASSESSMENT_MODE: ${{ inputs.mode }}
+      CI_INPUT_PR: ${{ inputs.pr_number }}
+      CI_EXPECTED_HEAD: ${{ inputs.expected_head_sha }}
+      CI_INPUT_ENVIRONMENT: ${{ inputs.environment }}
+      CI_INPUT_ASSET_CRITICALITY: ${{ inputs.asset_criticality }}
+      CI_INPUT_DATA_SENSITIVITY: ${{ inputs.data_sensitivity }}
     steps:
       - name: Allocate one isolated output directory per attempt
         id: workspace
@@ -71,6 +104,7 @@ jobs:
         env:
           FIXTURE: ${{ inputs.fixture }}
           CI_CONTEXT_PROFILE: ${{ inputs.context_profile }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           [[ "$(git -C trusted-control rev-parse HEAD)" == "$GITHUB_SHA" ]]
           . /etc/os-release
@@ -78,6 +112,8 @@ jobs:
           [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]
           if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
             python3 -I -B trusted-control/.github/ci_gate.py resolve-pr >> "$GITHUB_OUTPUT"
+          elif [[ "$CI_ASSESSMENT_MODE" == on_demand_pr ]]; then
+            python3 -I -B trusted-control/.github/ci_gate.py resolve-manual-pr >> "$GITHUB_OUTPUT"
           fi
           python3 -I -B trusted-control/.github/ci_gate.py context >> "$GITHUB_OUTPUT"
           [[ "$RUNTIME_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'Trusted runtime commit pin missing or invalid.'; exit 1; }
@@ -124,7 +160,7 @@ jobs:
           docker pull --platform linux/amd64 "$UBUNTU_IMAGE"
 
       - name: Check out the exact Terraform PR head in a separate directory
-        if: github.event_name == 'workflow_run'
+        if: steps.pins.outputs.sha != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.pins.outputs.sha }}
@@ -140,7 +176,7 @@ jobs:
           PR_SHA: ${{ steps.pins.outputs.sha }}
           FIXTURE: ${{ inputs.fixture }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+          if [[ -n "$PR_SHA" ]]; then
             python -I -B trusted-control/.github/ci_gate.py stage pr-source "$PR_SHA" "$RUN_ROOT/input"
           else
             python -I -B trusted-control/.github/ci_gate.py fixture "$FIXTURE" "$RUN_ROOT/input"
@@ -226,7 +262,7 @@ jobs:
                         gate_status=None, gate_exit_code=None, gate_json_sha256=None, gate_result_sha256=None,
                         wrapper_status="ERROR", wrapper_exit_code=20, failure_stage=stage, counts=None,
                         artifact_name=env["ARTIFACT_NAME"],
-                        publication_fixture=env.get("FIXTURE") if env["GITHUB_EVENT_NAME"] == "workflow_dispatch" else None)
+                        publication_fixture=env.get("FIXTURE") if env["GITHUB_EVENT_NAME"] == "workflow_dispatch" and env.get("CI_ASSESSMENT_MODE") != "on_demand_pr" else None)
           payload = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode()
           summary = (f"## Security Gate · ADVISORY_ONLY\nGate: N/A · Wrapper: ERROR/20 · {stage}\n\n"
                      f"Run {record['github_run_id']} · attempt {record['github_run_attempt']}\n\n"
