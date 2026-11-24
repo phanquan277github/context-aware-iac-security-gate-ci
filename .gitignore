@@ -25,3 +25,7 @@
 !/.github/ci_gate_fixtures/error/
 /.github/ci_gate_fixtures/error/*
 !/.github/ci_gate_fixtures/error/main.tf
+
+!/security_gate_payload/
+/security_gate_payload/**
+!/security_gate_payload/ci-gate-v1.tar
