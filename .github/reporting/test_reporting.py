@@ -62,6 +62,49 @@ class HistoryTests(unittest.TestCase):
             found.add(run)
         self.assertEqual(found, set(HOSTED))
 
+    def test_context_profiles_are_dispatch_only(self):
+        choose = report.gate.trusted_context
+        self.assertEqual(choose({}), ("CTX01", ("dev", "low", "low")))
+        values = {"FIXTURE": "ci5", "CI_CONTEXT_PROFILE": "CTX08"}
+        self.assertEqual(choose(dict(values, GITHUB_EVENT_NAME="workflow_run")),
+                         ("CTX01", ("dev", "low", "low")))
+        self.assertEqual(choose(dict(values, GITHUB_EVENT_NAME="workflow_dispatch")),
+                         ("CTX08", ("prod", "high", "high")))
+        for fixture, profile in (("review", "CTX08"), ("ci5", "invalid")):
+            with self.assertRaises(ValueError):
+                choose(dict(GITHUB_EVENT_NAME="workflow_dispatch", FIXTURE=fixture,
+                            CI_CONTEXT_PROFILE=profile))
+
+    def test_pr_signal_uses_matching_head_sha(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        head = {"sha": "1" * 40, "repo": {"id": 5}}
+        base = {"ref": "main", "repo": {"id": 5}}
+        pr = {"number": 42, "head": head, "base": base}
+        run = {"event": "pull_request", "conclusion": "success",
+               "path": ".github/workflows/security-gate-pr.yml", "head_repository": {"id": 5},
+               "head_sha": head["sha"], "pull_requests": [pr]}
+        event = {"workflow_run": run, "repository": {"id": 5, "default_branch": "main"}}
+        with tempfile.TemporaryDirectory() as folder:
+            payload = Path(folder) / "event.json"
+            with patch.dict(os.environ, GITHUB_EVENT_PATH=str(payload)), redirect_stdout(StringIO()) as out:
+                payload.write_text(json.dumps(event))
+                report.gate.resolve_pr()
+                self.assertEqual(out.getvalue(), f"sha={head['sha']}\nnumber=42\n")
+                # A new signal must carry a matching new head after synchronize.
+                head["sha"] = "2" * 40
+                payload.write_text(json.dumps(event))
+                with self.assertRaises(ValueError):
+                    report.gate.resolve_pr()
+                run["head_sha"] = head["sha"]
+                payload.write_text(json.dumps(event))
+                report.gate.resolve_pr()
+                self.assertTrue(out.getvalue().endswith(f"sha={head['sha']}\nnumber=42\n"))
+                head["repo"]["id"] = 6
+                payload.write_text(json.dumps(event))
+                with self.assertRaises(ValueError):
+                    report.gate.resolve_pr()
+
     def test_final_wrapper_step(self):
         import yaml
         workflow = yaml.safe_load((HERE.parent / "workflows/security-gate.yml").read_text())
@@ -179,6 +222,9 @@ class GateReportTests(unittest.TestCase):
 
     def test_status_process_mismatch(self):
         self.rejected(self.change(),code="0")
+
+    def test_bad_context_profile(self):
+        self.rejected(self.change(lambda d: d["business_context"].update(context_profile_id="CTX08")))
 
     def test_bad_counts(self):
         self.rejected(self.change(lambda d:d["counts"].update(failed_findings_total=99)))

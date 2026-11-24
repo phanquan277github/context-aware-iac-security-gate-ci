@@ -87,7 +87,7 @@ def public_result(doc, raw_digest, bundle, fixture):
 
 
 def prepare(args, env):
-    record, doc = gate.collect_record(args)
+    record, doc = gate.collect_record(args, env)
     event = env.get("GITHUB_EVENT_NAME")
     fixture = env.get("FIXTURE") if event == "workflow_dispatch" else None
     if doc is None and args.exit < 0:
@@ -97,8 +97,12 @@ def prepare(args, env):
             if env.get(variable) != "success":
                 record["failure_stage"] = stage
                 break
+    record["publication_fixture"] = fixture if fixture in gate.FIXTURES else None
+    signal = env.get("CI_SIGNAL_ID", "")
+    record["signal_run_id"] = int(signal) if event == "workflow_run" and re.fullmatch(r"[1-9][0-9]{0,19}", signal) else None
     verified_archive = env.get("ARCHIVE_OUTCOME") == "success"
     pin = env.get("RUNTIME_ARCHIVE_SHA", "")
+    terraform_digest = doc["input"]["artifact_sha256"] if doc is not None else None
     record.update(
         schema_version=EXEC_SCHEMA, artifact_name=history_name(record),
         execution_origin="github_actions" if env.get("GITHUB_ACTIONS") == "true" else "local_preview",
@@ -107,6 +111,8 @@ def prepare(args, env):
         workflow_ref="refs/heads/main" if env.get("GITHUB_REF") == "refs/heads/main" else None,
         runtime_archive_sha256=pin if verified_archive and gate.SHA64.fullmatch(pin) else None,
         scan_complete=gate.result_counts(doc)[1] if doc is not None else None,
+        terraform_artifact_sha256=(terraform_digest if isinstance(terraform_digest, str)
+                                   and gate.SHA64.fullmatch(terraform_digest) else None),
         deployment_model_id=MODEL_ID if doc is not None else None,
         model_trust_status=doc["model_provenance"]["trust_status"] if doc is not None else None,
     )

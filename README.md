@@ -38,6 +38,30 @@ Workflow yêu cầu lưu artifact **30 ngày**, tùy giới hạn của reposito
 
 Để kiểm CI-4 trên GitHub sau khi đưa workflow lên `main`, chọn **Run workflow** cho từng fixture `pass`, `review`, `error`. Đối chiếu Gate và wrapper lần lượt với `PASS/0`, `REVIEW/10`, `ERROR/20`, cùng `Fixture expectation: PASS` và kết quả upload. Fixture REVIEW có một finding đã chấm và một finding ngoài phạm vi. Fixture ERROR cần đối chiếu trạng thái `terraform_validate` trong export. Luồng Terraform PR có lượt nghiệm thu riêng.
 
+## Demo Pull Request CI-5
+
+Fixture [CI-5](.github/ci_gate_fixtures/ci5/main.tf) là Terraform tổng hợp dùng để trình diễn kiểm tra tĩnh. Fixture sạch dùng lại [PASS](.github/ci_gate_fixtures/pass/main.tf).
+
+Khi PR trong cùng repository nhắm vào `main` và thay đổi `terraform/**`, workflow **Security Gate PR signal** báo sự kiện cho workflow **Security Gate advisory** chạy từ nhánh mặc định. PR dùng `CTX01` (`dev / low / low`). Mở artifact theo hướng dẫn trên và đối chiếu `execution.json.pr_number`, `input_commit_sha` và `scanned_commit_sha` với PR head. Khi push bản sửa vào cùng nhánh PR, kiểm tra run mới và lưu artifact lần trước vào thư mục riêng trước khi so sánh. GitHub yêu cầu payload `workflow_run` chỉ ra đúng một PR cùng repository để bước xác minh có thể tiếp tục.
+
+Để so sánh hai bối cảnh với cùng đầu vào, vào **Actions → Security Gate advisory → Run workflow** trên `main`, chọn fixture `ci5` và lần lượt chọn `CTX01` (`dev / low / low`) và `CTX08` (`prod / high / high`). So sánh hai artifact có cùng `terraform_artifact_sha256`, model SHA-256, runtime commit và finding IDs. `context_profile_id` ghi profile đã chọn. Các score và rank trong `gate-result.json` dùng để trình diễn suy luận vận hành. Mức thay đổi score có thể khác nhau giữa các finding. Luồng PR giữ chế độ `ADVISORY_ONLY`.
+
+## Dashboard và phản hồi PR (CI-4E)
+
+Publisher nhận sự kiện hoàn tất của **Security Gate advisory**, bao gồm REVIEW và ERROR. Quyền công bố giới hạn ở các fixture tổng hợp trong [demo-scope.json](.github/publishing/demo-scope.json). Với PR, phải đối chiếu được signal và commit thuộc cùng repository; thư mục `terraform/` tại commit đó phải chứa đúng blob `main.tf` đã duyệt. Với fixture dispatch, publisher kiểm blob ở revision điều khiển. Thiếu bằng chứng sẽ bỏ qua hoặc báo lỗi ở publisher; artifact CI-4 vẫn theo quy trình Gate.
+
+### Bật Pages và kiểm thử
+
+1. Trên GitHub chọn **Settings → Pages → Build and deployment → Source → GitHub Actions**. Trong **Actions → Publish advisory security report → Run workflow**, chọn `main`, để trống `source_run`. Lượt này khởi tạo hoặc dựng lại toàn bộ site từ lịch sử đã lưu. Xem URL thật trong environment `github-pages`. URL mặc định dự kiến là [Security Dashboard](https://phanquan277github.github.io/context-aware-iac-security-gate-ci/).
+2. Dispatch lần lượt các fixture `pass`, `review`, `error` trên phiên bản mới. Đối chiếu digest artifact, trạng thái Gate/wrapper, score/rank và đường dẫn `reports/<RUN_ID>/attempt-<ATTEMPT>/report.html`. Các lượt chẩn đoán và scan chưa hoàn tất được phân biệt trong dashboard.
+3. Rerun một fixture. Kiểm tra cả hai URL theo attempt và hai bản ghi trong `history.json`. Workflow yêu cầu retention 30 ngày cho artifact CI-4. Các trang và bản ghi trên nhánh `gh-pages` tồn tại theo vòng đời riêng.
+4. Mở PR demo CI-5 từ cùng repository. Đối chiếu SHA trong comment bot với head của PR. Push bản remediated lên cùng PR, chờ báo cáo mới và kiểm comment được cập nhật tại chỗ. Mỗi kết quả có run/attempt riêng. Khi Pages deploy lỗi, comment dẫn đến Actions run. Nếu chủ repo thiết lập custom domain, đối chiếu và cập nhật hằng `SITE` trong publisher trước khi sử dụng liên kết công khai.
+5. Khi bỏ lỡ một lượt hoặc upload/deploy lỗi, dispatch publisher trên `main` với `source_run` và `source_attempt` chính xác khi artifact còn tải được. Để riêng `source_run` trống nếu chỉ cần deploy lại các báo cáo đã lưu. Không cần chạy lại Gate.
+
+Nhánh `gh-pages` dành riêng cho nội dung sinh tự động. Mỗi lần chạy xác minh record, giữ báo cáo cũ, xây lại chỉ mục rồi push fast-forward. Nhóm concurrency chung tuần tự hóa lưu trữ, deploy và comment. GitHub cho phép tối đa 100 lượt chờ với `queue: max`. Lịch sử tăng theo số attempt; chủ repo có thể sao lưu và chủ động loại bỏ cả thư mục attempt được chọn, sau đó chạy rebuild. Phiên bản renderer mới làm thay đổi HTML đã lưu sẽ bị từ chối để tránh sửa ngầm bằng chứng. Quyền ghi lên nhánh lịch sử và nhánh mặc định là một phần của ranh giới tin cậy.
+
+Dashboard dùng tệp tĩnh và tải `history.json` qua HTTP. Bản mẫu cục bộ có thể xem bằng `python3 -m http.server 8765 --bind 127.0.0.1 --directory docs/ci4e_acceptance/preview`, sau đó mở `http://127.0.0.1:8765/`. Mẫu nội bộ dùng metadata CI-4 để kiểm giao diện; việc thêm lịch sử công khai bắt đầu từ các lượt Gate có provenance CI-4E.
+
 ## Nguồn và ghi công cho runtime `ci-gate-v1`
 
 - **GenIaC-SecBench — Animesh Shaw.** Benchmark dùng để huấn luyện model vận hành D-038 dùng dữ liệu từ revision `a9f0b979176e9127aa60c8e8197d03d9fffdda58`. Dataset công bố phần dữ liệu do dự án GenIaC tạo theo CC BY 4.0. Phần human reference theo điều khoản của từng nguồn upstream. [Dataset](https://huggingface.co/datasets/AnimeshShaw/GenIaC-SecBench) · [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)

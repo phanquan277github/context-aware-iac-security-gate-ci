@@ -9,7 +9,13 @@ on:
       fixture:
         description: Trusted synthetic Terraform fixture
         type: choice
-        options: [pass, review, error]
+        options: [pass, review, error, ci5]
+        required: true
+      context_profile:
+        description: Trusted business context (CTX08 is limited to ci5)
+        type: choice
+        options: [CTX01, CTX08]
+        default: CTX01
         required: true
 
 permissions:
@@ -62,6 +68,9 @@ jobs:
 
       - name: Resolve PR input and check trusted release pins
         id: pins
+        env:
+          FIXTURE: ${{ inputs.fixture }}
+          CI_CONTEXT_PROFILE: ${{ inputs.context_profile }}
         run: |
           [[ "$(git -C trusted-control rev-parse HEAD)" == "$GITHUB_SHA" ]]
           . /etc/os-release
@@ -70,6 +79,7 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
             python3 -I -B trusted-control/.github/ci_gate.py resolve-pr >> "$GITHUB_OUTPUT"
           fi
+          python3 -I -B trusted-control/.github/ci_gate.py context >> "$GITHUB_OUTPUT"
           [[ "$RUNTIME_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'Trusted runtime commit pin missing or invalid.'; exit 1; }
           [[ "$RUNTIME_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo 'Trusted archive digest missing or invalid.'; exit 1; }
           [[ "$UBUNTU_IMAGE" =~ ^docker\.io/library/ubuntu@sha256:[0-9a-f]{64}$ ]] ||
@@ -138,6 +148,10 @@ jobs:
 
       - name: Run the parity Gate in an offline read-only sandbox
         id: gate
+        env:
+          GATE_ENVIRONMENT: ${{ steps.pins.outputs.environment }}
+          GATE_ASSET_CRITICALITY: ${{ steps.pins.outputs.asset_criticality }}
+          GATE_DATA_SENSITIVITY: ${{ steps.pins.outputs.data_sensitivity }}
         run: |
           pyroot="$(python -I -B -c 'import sys; print(sys.base_prefix)')"
           [[ "$pyroot" == /opt/hostedtoolcache/Python/3.12.3/x64 ]]
@@ -161,7 +175,8 @@ jobs:
             --release "$BUNDLE_DIR" \
             --expected-manifest-sha256 e9c723e256dfbe31ea927ad74990686b94b2f8d7831bc7c665b55ba109a73fa2 \
             --dev-only --launch -- \
-            --terraform /input --environment dev --asset-criticality low --data-sensitivity low \
+            --terraform /input --environment "$GATE_ENVIRONMENT" --asset-criticality "$GATE_ASSET_CRITICALITY" \
+            --data-sensitivity "$GATE_DATA_SENSITIVITY" \
             --output /output/gate.json > "$RUN_ROOT/gate.log" 2>&1
           rc=$?
           set -e
@@ -174,6 +189,8 @@ jobs:
           GATE_EXIT: ${{ steps.gate.outputs.exit }}
           PR_SHA: ${{ steps.pins.outputs.sha }}
           CI_PR_NUMBER: ${{ steps.pins.outputs.number }}
+          CI_CONTEXT_PROFILE: ${{ inputs.context_profile }}
+          CI_SIGNAL_ID: ${{ github.event.workflow_run.id }}
           CONTROL_OUTCOME: ${{ steps.control.outcome }}
           ARTIFACT_NAME: security-gate-${{ steps.workspace.outputs.name }}
           PINS_OUTCOME: ${{ steps.pins.outcome }}
@@ -208,7 +225,8 @@ jobs:
                         github_run_number=int(env["GITHUB_RUN_NUMBER"]), fixture_expectation=None,
                         gate_status=None, gate_exit_code=None, gate_json_sha256=None, gate_result_sha256=None,
                         wrapper_status="ERROR", wrapper_exit_code=20, failure_stage=stage, counts=None,
-                        artifact_name=env["ARTIFACT_NAME"])
+                        artifact_name=env["ARTIFACT_NAME"],
+                        publication_fixture=env.get("FIXTURE") if env["GITHUB_EVENT_NAME"] == "workflow_dispatch" else None)
           payload = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode()
           summary = (f"## Security Gate · ADVISORY_ONLY\nGate: N/A · Wrapper: ERROR/20 · {stage}\n\n"
                      f"Run {record['github_run_id']} · attempt {record['github_run_attempt']}\n\n"

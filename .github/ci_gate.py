@@ -26,7 +26,9 @@ POLICY = "results/main_benchmark/phase8_prototype_policy_v1.json"
 VERIFIER = "runtime/scripts/prototype_v1/ci_release_verifier.py"
 EXIT = {0: "PASS", 10: "REVIEW", 20: "ERROR"}
 CONTROL = Path(__file__).resolve().parent
-FIXTURES = {"pass": 0, "review": 10, "error": 20}
+FIXTURES = {"pass": 0, "review": 10, "error": 20, "ci5": 10}
+CONTEXT_KEYS = ("environment", "asset_criticality", "data_sensitivity")
+CONTEXT_PROFILES = {"CTX01": ("dev", "low", "low"), "CTX08": ("prod", "high", "high")}
 SHA40 = re.compile("[0-9a-f]{40}")
 SHA64 = re.compile("[0-9a-f]{64}")
 
@@ -216,7 +218,22 @@ def resolve_pr():
     print(f"number={pr['number']}")
 
 
-def verified_document(root, raw, code):
+def trusted_context(env):
+    if env.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
+        return "CTX01", CONTEXT_PROFILES["CTX01"]
+    profile = env.get("CI_CONTEXT_PROFILE") or "CTX01"
+    require(profile in CONTEXT_PROFILES and (profile == "CTX01" or env.get("FIXTURE") == "ci5"),
+            "Context profile is not allowed for this fixture")
+    return profile, CONTEXT_PROFILES[profile]
+
+
+def context_outputs():
+    _, context = trusted_context(os.environ)
+    for key, value in zip(CONTEXT_KEYS, context):
+        print(f"{key}={value}")
+
+
+def verified_document(root, raw, code, profile, expected_context):
     verify_bundle(root, overlay=True)
     data = regular(raw / "gate.json", 16 * 1024 * 1024)
     checksum = sha(data)
@@ -228,8 +245,10 @@ def verified_document(root, raw, code):
             and document["exit_code"] == code and document.get("gate_status") == EXIT[code],
             "Gate status and process exit disagree")
     context = document["business_context"]
-    require(tuple(context.get(key) for key in ("environment", "asset_criticality", "data_sensitivity"))
-            == ("dev", "low", "low"),
+    reported_profile = context["context_profile_id"]
+    # D-039 can return ERROR before deriving its profile from the trusted tuple.
+    require(tuple(context.get(key) for key in CONTEXT_KEYS) == expected_context
+            and (reported_profile == profile or (code == 20 and reported_profile is None)),
             "Gate business context differs from the trusted workflow")
     require(document["model_provenance"]["deployment_model_sha256"] == MODEL_SHA,
             "Gate JSON model SHA-256 differs from the pin")
@@ -258,10 +277,12 @@ def result_counts(document):
     return public_counts, isinstance(scan, dict) and scan.get("status") == "success"
 
 
-def collect_record(args):
+def collect_record(args, env=None):
+    env = os.environ if env is None else env
+    profile, context = trusted_context(env)
     document = None
     def numeric(name):
-        value = os.environ.get(name, "")
+        value = env.get(name, "")
         return int(value) if re.fullmatch(r"\d{1,20}", value) else None
 
     input_commit = args.commit if SHA40.fullmatch(args.commit) else None
@@ -280,7 +301,8 @@ def collect_record(args):
         "release_id": RELEASE_ID,
         "manifest_sha256": MANIFEST_SHA,
         "model_sha256": MODEL_SHA,
-        "business_context": {"environment": "dev", "asset_criticality": "low", "data_sensitivity": "low"},
+        "business_context": dict(zip(CONTEXT_KEYS, context)),
+        "context_profile_id": profile,
         "gate_status": None,
         "gate_exit_code": None,
         "process_exit_code": args.exit,
@@ -292,7 +314,7 @@ def collect_record(args):
     }
     try:
         require(args.exit in EXIT, "Gate process did not return a supported exit code")
-        checksum, verified = verified_document(args.bundle, args.raw, args.exit)
+        checksum, verified = verified_document(args.bundle, args.raw, args.exit, profile, context)
         counts, scan_complete = result_counts(verified)
         document = verified
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, ImportError,
@@ -327,6 +349,7 @@ def main():
         "collect": (("bundle", Path), ("raw", Path), ("exit", int), ("report", Path),
                     ("start", str), ("commit", str), ("runtime_sha", str)),
         "resolve-pr": (),
+        "context": (),
     }
     for name, arguments in spec.items():
         command = commands.add_parser(name)
@@ -334,7 +357,7 @@ def main():
             command.add_argument(argument, type=kind, **({"choices": FIXTURES} if argument == "name" else {}))
     args = parser.parse_args()
     runners = {"pack": pack, "unpack": unpack, "stage": prepare_input, "fixture": fixture,
-               "provision": toolchain_steps, "resolve-pr": resolve_pr}
+               "provision": toolchain_steps, "resolve-pr": resolve_pr, "context": context_outputs}
     if args.command == "collect":
         collect(args)
         return

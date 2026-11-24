@@ -1,0 +1,94 @@
+name: Publish advisory security report
+on:
+  workflow_run:
+    workflows: [Security Gate advisory]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Gate run ID (empty rebuilds the stored site)
+        type: string
+      source_attempt:
+        description: Gate attempt
+        type: string
+        default: '1'
+
+permissions: {}
+concurrency:
+  group: ci4e-history-and-pages
+  queue: max
+
+jobs:
+  ingest:
+    if: github.repository == 'phanquan277github/context-aware-iac-security-gate-ci' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions: {actions: read, contents: read, pull-requests: read}
+    outputs:
+      ready: ${{ steps.read.outputs.ready }}
+      payload: ${{ steps.read.outputs.payload }}
+      initialize: ${{ steps.read.outputs.initialize }}
+      pr: ${{ steps.read.outputs.pr }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - name: Ensure distro JSON Schema validator
+        run: /usr/bin/python3 -I -c 'import jsonschema' || (sudo apt-get update -qq && sudo apt-get install -y python3-jsonschema)
+      - id: read
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id || inputs.source_run }}
+          SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt || inputs.source_attempt }}
+        run: /usr/bin/python3 -I -B .github/publishing/publisher.py ingest
+
+  store:
+    needs: ingest
+    if: needs.ingest.outputs.ready == 'yes'
+    runs-on: ubuntu-24.04
+    permissions: {contents: write}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Ensure distro JSON Schema validator
+        run: /usr/bin/python3 -I -c 'import jsonschema' || (sudo apt-get update -qq && sudo apt-get install -y python3-jsonschema)
+      - name: Append verified run and build complete site
+        env:
+          RECORD: ${{ needs.ingest.outputs.payload }}
+          INITIALIZE: ${{ needs.ingest.outputs.initialize }}
+          SITE_DIR: ${{ runner.temp }}/security-site
+        run: /usr/bin/python3 -I -B .github/publishing/build_dashboard.py
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: ${{ runner.temp }}/security-site
+
+  deploy:
+    needs: store
+    runs-on: ubuntu-24.04
+    permissions: {pages: write, id-token: write}
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    outputs:
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - id: pages
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+      - if: failure()
+        run: echo 'Kiểm tra Settings → Pages → Build and deployment → Source → GitHub Actions.' >> "$GITHUB_STEP_SUMMARY"
+
+  comment:
+    needs: [ingest, store, deploy]
+    if: always() && needs.ingest.result == 'success' && needs.ingest.outputs.pr != ''
+    runs-on: ubuntu-24.04
+    permissions: {contents: read, pull-requests: write}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - name: Ensure distro JSON Schema validator
+        run: /usr/bin/python3 -I -c 'import jsonschema' || (sudo apt-get update -qq && sudo apt-get install -y python3-jsonschema)
+      - name: Update current same-repository PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECORD: ${{ needs.ingest.outputs.payload }}
+          DEPLOYED: ${{ needs.deploy.result }}
+          PAGE_URL: ${{ needs.deploy.outputs.url }}
+        run: /usr/bin/python3 -I -B .github/publishing/publisher.py comment

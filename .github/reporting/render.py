@@ -71,9 +71,10 @@ def html_report(record, result, execution_digest, export_digest):
     section("Thông tin thực thi", facts((key, record.get(key)) for key in (
         "execution_origin", "github_run_id", "github_run_number", "github_run_attempt", "started_utc", "finished_utc",
         "duration_seconds", "trigger_event", "workflow_ref", "pr_number", "scanned_commit_sha",
-        "artifact_name")))
+        "artifact_name", "terraform_artifact_sha256")))
     section("Bối cảnh triển khai", facts((key, (record.get("business_context") or {}).get(key))
-                                        for key in ("environment", "asset_criticality", "data_sensitivity")))
+                                        for key in ("environment", "asset_criticality", "data_sensitivity"))
+            + facts([("context_profile_id", record.get("context_profile_id"))]))
     counts = record.get("counts")
     coverage = "<p>N/A</p>"
     if counts:
@@ -130,6 +131,8 @@ def markdown(record, result):
              "- Bối cảnh: " + " / ".join(display(ctx.get(k)) for k in ("environment", "asset_criticality", "data_sensitivity")),
              f"- Run / attempt: {record['github_run_id']} / {record['github_run_attempt']}",
              f"- Artifact: `{record['artifact_name']}`"]
+    if record.get("context_profile_id"):
+        lines.append(f"- Hồ sơ ngữ cảnh: {record['context_profile_id']}")
     if record.get("fixture_expectation"):
         lines.append(f"- Fixture expectation: {record['fixture_expectation']}")
     if result and result["ranked_supported_findings"]:

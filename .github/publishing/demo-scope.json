@@ -1,0 +1,90 @@
+{
+  "ci5": {
+    "blob": "e97848afab940ba7d80ed2344dd77535ebe434b9",
+    "descriptors": {
+      "CKV2_AWS_11": [
+        "Ensure VPC flow logging is enabled in all VPCs",
+        "aws_vpc",
+        null,
+        "main.tf"
+      ],
+      "CKV2_AWS_12": [
+        null,
+        "aws_vpc",
+        null,
+        "main.tf"
+      ],
+      "CKV2_AWS_5": [
+        null,
+        "aws_security_group",
+        null,
+        "main.tf"
+      ],
+      "CKV_AWS_260": [
+        "Ensure no security groups allow ingress from 0.0.0.0:0 to port 80",
+        "aws_security_group_rule",
+        null,
+        "main.tf"
+      ],
+      "CKV_AWS_289": [
+        null,
+        "aws_iam_policy",
+        null,
+        "main.tf"
+      ],
+      "CKV_AWS_355": [
+        "Ensure no IAM policies documents allow \"*\" as a statement's resource for restrictable actions",
+        "aws_iam_policy",
+        null,
+        "main.tf"
+      ],
+      "CKV_AWS_382": [
+        "Ensure no security groups allow egress from 0.0.0.0:0 to port -1",
+        "aws_security_group_rule",
+        null,
+        "main.tf"
+      ]
+    },
+    "input": "8febb34021dd4d0a06e4cd671a77df82da06f5d5a55f97acc7f7195b81d53db1"
+  },
+  "error": {
+    "blob": "7677095e485c7d42835c43dd9e5efd5c4ab467b5",
+    "descriptors": {},
+    "input": "a0ef1ac8256152827ab33e11b84e51f5f4f6611eddccc9f59a46e5671dac51ab"
+  },
+  "pass": {
+    "blob": "4ac68b7e9afc8e8afedbafc7252229898ee38033",
+    "descriptors": {},
+    "input": "d083d5a38d87db0243a98109d7f3cb1c32d4616267bf3266a9bbcc1a9a8677d6"
+  },
+  "remediated": {
+    "blob": "92b8849bab0f14e541d2ee646427be756dae78ec",
+    "descriptors": {
+      "CKV2_AWS_5": [
+        null,
+        "aws_security_group",
+        null,
+        "main.tf"
+      ]
+    },
+    "input": "5690f677cf2052ab77f85edc34eb4de0a015689c9fb2e3e6eea8315bc9649058"
+  },
+  "review": {
+    "blob": "bca5edfd7dc6d17b5989bf135930292b0653b63b",
+    "descriptors": {
+      "CKV2_AWS_11": [
+        "Ensure VPC flow logging is enabled in all VPCs",
+        "aws_vpc",
+        "aws_vpc.demonstration",
+        "main.tf"
+      ],
+      "CKV2_AWS_12": [
+        null,
+        "aws_vpc",
+        "aws_vpc.demonstration",
+        "main.tf"
+      ]
+    },
+    "input": "4265747552e77a22f60b94ecfbf8cce26e17c894fbf6859623bc32b2cc6d299e"
+  }
+}
