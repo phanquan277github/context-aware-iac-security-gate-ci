@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -62,9 +63,15 @@ def invalid_constant(_value):
     raise ValueError("Invalid non-finite JSON constant")
 
 
+def finite_float(token):
+    value = float(token)
+    require(math.isfinite(value), "Non-finite JSON number")
+    return value
+
+
 def strict_json(data):
     return json.loads(data.decode("utf-8"), object_pairs_hook=unique_object,
-                      parse_constant=invalid_constant)
+                      parse_constant=invalid_constant, parse_float=finite_float)
 
 
 def inventory(manifest):
@@ -209,7 +216,7 @@ def resolve_pr():
     print(f"number={pr['number']}")
 
 
-def verified_result(root, raw, code):
+def verified_document(root, raw, code):
     verify_bundle(root, overlay=True)
     data = regular(raw / "gate.json", 16 * 1024 * 1024)
     checksum = sha(data)
@@ -226,6 +233,9 @@ def verified_result(root, raw, code):
             "Gate business context differs from the trusted workflow")
     require(document["model_provenance"]["deployment_model_sha256"] == MODEL_SHA,
             "Gate JSON model SHA-256 differs from the pin")
+    model = document["model_provenance"]
+    require(model.get("deployment_model_id") == "rf_severity_context_deployment_v1"
+            and model.get("trust_status") in {"verified", "not_verified"}, "Unexpected Gate model identity")
     runtime = root / "runtime"
     require(not any(name == "scripts" or name.startswith("scripts.") for name in sys.modules),
             "Unexpected validation module already imported")
@@ -235,16 +245,21 @@ def verified_result(root, raw, code):
         validate_output(document, strict_json(regular(runtime / POLICY)))
     finally:
         sys.path.pop(0)
+    return checksum, document
+
+
+def result_counts(document):
     counts = document["counts"]
     require(all(type(value) is int and value >= 0 for value in counts.values()),
             "Gate counts were not safe integers")
     public_counts = {key: counts[key] for key in (
         "failed_findings_total", "supported_findings", "unsupported_findings", "unscorable_findings")}
     scan = document["execution_status"]["checkov_scan"]
-    return checksum, public_counts, isinstance(scan, dict) and scan.get("status") == "success"
+    return public_counts, isinstance(scan, dict) and scan.get("status") == "success"
 
 
-def collect(args):
+def collect_record(args):
+    document = None
     def numeric(name):
         value = os.environ.get(name, "")
         return int(value) if re.fullmatch(r"\d{1,20}", value) else None
@@ -277,9 +292,11 @@ def collect(args):
     }
     try:
         require(args.exit in EXIT, "Gate process did not return a supported exit code")
-        checksum, counts, scan_complete = verified_result(args.bundle, args.raw, args.exit)
+        checksum, verified = verified_document(args.bundle, args.raw, args.exit)
+        counts, scan_complete = result_counts(verified)
+        document = verified
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, ImportError,
-            subprocess.SubprocessError, RecursionError):
+            subprocess.SubprocessError, RecursionError, OverflowError, AttributeError):
         result["failure_stage"] = "GATE_OUTPUT_VERIFICATION" if args.exit in EXIT else "GATE_EXECUTION"
     else:
         result.update(gate_status=EXIT[args.exit], gate_exit_code=args.exit,
@@ -287,6 +304,11 @@ def collect(args):
                       failure_stage="GATE" if args.exit == 20 else None,
                       gate_json_sha256=checksum, counts=counts,
                       scanned_commit_sha=input_commit if scan_complete else None)
+    return result, document
+
+
+def collect(args):
+    result, _ = collect_record(args)
     with args.report.open("x", encoding="utf-8") as output:
         json.dump(result, output, indent=2, sort_keys=True, allow_nan=False)
         output.write("\n")

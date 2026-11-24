@@ -19,12 +19,24 @@ Luồng xử lý theo D-039:
 
 Gate decision dựa trên tình trạng hoàn tất và failed findings. Điểm Random Forest quyết định thứ tự ưu tiên trong danh sách được chấm.
 
-## Trạng thái tích hợp
+## Báo cáo và lịch sử thực thi
 
-Repository nghiên cứu lưu phương pháp, dữ liệu, model và hồ sơ đánh giá. Repository CI này dành cho cấu hình tích hợp và bước thử runner. Workflow [Runner smoke](.github/workflows/runner-smoke.yml) chuẩn bị kiểm Linux x64, phiên bản Python sẵn có và cấu trúc workspace trên GitHub-hosted Ubuntu. Chưa có kết quả smoke test trên GitHub.
+Security Gate chạy ở chế độ `ADVISORY_ONLY`. Ba fixture CI-3B3 đã được chạy trên GitHub. CI-4 bổ sung báo cáo HTML và JSON cho những lượt chạy dùng workflow mới. [Workflow](.github/workflows/security-gate.yml)
 
-Một workflow Security Gate trong tương lai sẽ cần release đã xác thực và quyền phân phối đã được duyệt. Trong giai đoạn này, Security Gate ở mức `ADVISORY_ONLY`. Phạm vi dự án không bao gồm `terraform apply` hoặc triển khai hạ tầng cloud production.
+1. Trong **Actions → Security Gate advisory**, chọn run và attempt cần xem. Job Summary ghi trạng thái Gate, trạng thái wrapper trước upload, số finding và tối đa năm finding đứng đầu.
+2. Tải artifact `security-gate-<UTC_TIMESTAMP>_run-<RUN_ID>_attempt-<ATTEMPT>`. Giải nén vào thư mục riêng cho từng attempt. Trong thư mục đó chạy:
 
+   ```bash
+   sha256sum --check --strict checksums.sha256
+   ```
+
+3. Khi mọi file đều báo `OK`, mở `report.html` trong trình duyệt. HTML chạy offline. `report.md` chứa nội dung Job Summary. Mở `execution.json` để xem exit codes, run, context, provenance và checksum. Khi Gate JSON nguồn được xác minh và xuất thành công, `gate-result.json` giữ score, expected rank, tie size và đặc trưng của từng finding đã chấm. [Schema JSON v1](.github/reporting/gate-result-v1.schema.json)
+
+`execution.json.gate_json_sha256` nhận diện bytes của Gate JSON nguồn trên runner. `gate_result_sha256` và sidecar của `gate-result.json` nhận diện bytes đã lọc. Checksum cho phép phát hiện bản tải bị thay đổi. Điểm D-038 phục vụ xếp hạng trong lượt chạy. Finding ngoài phạm vi hoặc thiếu đặc trưng vẫn xuất hiện với score và rank bằng `null`. Bản công bố lược bỏ tên tài nguyên do PR cung cấp, dữ liệu Terraform, log thô và đường dẫn tùy ý. `workflow_ref` chỉ nhánh của workflow điều khiển; `scanned_commit_sha` xác định đầu vào khi scan hoàn tất.
+
+Workflow yêu cầu lưu artifact **30 ngày**, tùy giới hạn của repository. Mỗi attempt có artifact riêng. Nếu upload thất bại, bước cuối trả `ERROR/20`; trạng thái Gate đã xác minh vẫn có thể xem trong Job Summary. Lỗi bootstrap cho báo cáo chẩn đoán khi runner còn hoạt động. Run bị hủy hoặc runner chưa khởi tạo có thể thiếu artifact. Ba artifact CI-3B3 cũ chỉ lưu metadata và số đếm.
+
+Để kiểm CI-4 trên GitHub sau khi đưa workflow lên `main`, chọn **Run workflow** cho từng fixture `pass`, `review`, `error`. Đối chiếu Gate và wrapper lần lượt với `PASS/0`, `REVIEW/10`, `ERROR/20`, cùng `Fixture expectation: PASS` và kết quả upload. Fixture REVIEW có một finding đã chấm và một finding ngoài phạm vi. Fixture ERROR cần đối chiếu trạng thái `terraform_validate` trong export. Luồng Terraform PR có lượt nghiệm thu riêng.
 
 ## Nguồn và ghi công cho runtime `ci-gate-v1`
 

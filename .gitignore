@@ -29,3 +29,10 @@
 !/security_gate_payload/
 /security_gate_payload/**
 !/security_gate_payload/ci-gate-v1.tar
+
+!/.github/reporting/
+/.github/reporting/*
+!/.github/reporting/generate_report.py
+!/.github/reporting/render.py
+!/.github/reporting/test_reporting.py
+!/.github/reporting/gate-result-v1.schema.json

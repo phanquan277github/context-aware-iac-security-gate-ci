@@ -1,0 +1,454 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CI-4 · ci4-advisory-gate-result-v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "enum": [
+        "ci4-advisory-gate-result-v1"
+      ]
+    },
+    "source_gate_json_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "gate_status": {
+      "enum": [
+        "PASS",
+        "REVIEW",
+        "ERROR"
+      ]
+    },
+    "gate_exit_code": {
+      "enum": [
+        0,
+        10,
+        20
+      ]
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "failed_findings_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "supported_findings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unsupported_findings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unscorable_findings": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "failed_findings_total",
+        "supported_findings",
+        "unsupported_findings",
+        "unscorable_findings"
+      ],
+      "additionalProperties": false
+    },
+    "execution_status": {
+      "type": "object",
+      "properties": {
+        "terraform_init": {
+          "enum": [
+            "success",
+            "error",
+            "not_run"
+          ]
+        },
+        "terraform_validate": {
+          "enum": [
+            "success",
+            "error",
+            "not_run"
+          ]
+        },
+        "checkov_scan": {
+          "enum": [
+            "success",
+            "error",
+            "not_run"
+          ]
+        },
+        "feature_extraction": {
+          "enum": [
+            "success",
+            "error",
+            "not_run"
+          ]
+        },
+        "model_scoring": {
+          "enum": [
+            "success",
+            "error",
+            "not_run"
+          ]
+        }
+      },
+      "required": [
+        "terraform_init",
+        "terraform_validate",
+        "checkov_scan",
+        "feature_extraction",
+        "model_scoring"
+      ],
+      "additionalProperties": false
+    },
+    "ranked_supported_findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/scored"
+      }
+    },
+    "unsupported_findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/unscored"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_gate_json_sha256",
+    "gate_status",
+    "gate_exit_code",
+    "counts",
+    "execution_status",
+    "ranked_supported_findings",
+    "unsupported_findings"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "context": {
+      "type": "object",
+      "properties": {
+        "asset_criticality": {
+          "enum": [
+            "low",
+            "high"
+          ]
+        },
+        "data_sensitivity": {
+          "enum": [
+            "low",
+            "high"
+          ]
+        },
+        "encryption_missing": {
+          "enum": [
+            "yes",
+            "no",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "environment": {
+          "enum": [
+            "dev",
+            "prod"
+          ]
+        },
+        "internet_exposure": {
+          "enum": [
+            "yes",
+            "no",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "logging_missing": {
+          "enum": [
+            "yes",
+            "no",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "privilege_impact": {
+          "enum": [
+            "0",
+            "1",
+            "2",
+            "3",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "public_access": {
+          "enum": [
+            "yes",
+            "no",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "reachability": {
+          "enum": [
+            "internal",
+            "internet",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "resource_role": {
+          "enum": [
+            "identity",
+            "primary_data",
+            "logging",
+            "network",
+            "compute",
+            "other"
+          ]
+        },
+        "wildcard_action": {
+          "enum": [
+            "yes",
+            "no",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "wildcard_resource": {
+          "enum": [
+            "yes",
+            "no",
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      },
+      "required": [
+        "asset_criticality",
+        "data_sensitivity",
+        "encryption_missing",
+        "environment",
+        "internet_exposure",
+        "logging_missing",
+        "privilege_impact",
+        "public_access",
+        "reachability",
+        "resource_role",
+        "wildcard_action",
+        "wildcard_resource"
+      ],
+      "additionalProperties": false
+    },
+    "scored": {
+      "type": "object",
+      "properties": {
+        "finding_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "check_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^CKV2?_AWS_[0-9]{1,6}$"
+        },
+        "check_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "enum": [
+            "aws_vpc.demonstration",
+            null
+          ]
+        },
+        "source_path": {
+          "enum": [
+            "main.tf",
+            null
+          ]
+        },
+        "line_start": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "line_end": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "classification": {
+          "enum": [
+            "scored"
+          ]
+        },
+        "severity_numeric": {
+          "enum": [
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        "context_features": {
+          "$ref": "#/$defs/context"
+        },
+        "priority_score": {
+          "type": "number"
+        },
+        "priority_rank_expected": {
+          "type": "number",
+          "minimum": 1
+        },
+        "priority_tie_group_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "unsupported_reason": {
+          "enum": [
+            null
+          ]
+        }
+      },
+      "required": [
+        "finding_id",
+        "check_id",
+        "check_name",
+        "resource_type",
+        "resource",
+        "source_path",
+        "line_start",
+        "line_end",
+        "classification",
+        "severity_numeric",
+        "context_features",
+        "priority_score",
+        "priority_rank_expected",
+        "priority_tie_group_size",
+        "unsupported_reason"
+      ],
+      "additionalProperties": false
+    },
+    "unscored": {
+      "type": "object",
+      "properties": {
+        "finding_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "check_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^CKV2?_AWS_[0-9]{1,6}$"
+        },
+        "check_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "enum": [
+            "aws_vpc.demonstration",
+            null
+          ]
+        },
+        "source_path": {
+          "enum": [
+            "main.tf",
+            null
+          ]
+        },
+        "line_start": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "line_end": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "classification": {
+          "enum": [
+            "unsupported_rule",
+            "unscorable_feature_extraction"
+          ]
+        },
+        "severity_numeric": {
+          "enum": [
+            null
+          ]
+        },
+        "context_features": {
+          "enum": [
+            null
+          ]
+        },
+        "priority_score": {
+          "enum": [
+            null
+          ]
+        },
+        "priority_rank_expected": {
+          "enum": [
+            null
+          ]
+        },
+        "priority_tie_group_size": {
+          "enum": [
+            null
+          ]
+        },
+        "unsupported_reason": {
+          "enum": [
+            "UNSUPPORTED_RULE",
+            "UNSCORABLE_FEATURE_EXTRACTION"
+          ]
+        }
+      },
+      "required": [
+        "finding_id",
+        "check_id",
+        "check_name",
+        "resource_type",
+        "resource",
+        "source_path",
+        "line_start",
+        "line_end",
+        "classification",
+        "severity_numeric",
+        "context_features",
+        "priority_score",
+        "priority_rank_expected",
+        "priority_tie_group_size",
+        "unsupported_reason"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
