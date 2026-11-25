@@ -24,7 +24,12 @@ ARCHIVE = "975ae49a69a61af6e06d64c081368d31ed0308856677f2e7a64fadb97d76d434"
 RUNTIME = "bfb442e830511c657520d1477931593564459e29"
 MODEL_ID = "rf_severity_context_deployment_v1"
 MANIFEST = "e9c723e256dfbe31ea927ad74990686b94b2f8d7831bc7c665b55ba109a73fa2"
-DEMO = json.loads((HERE/"demo-scope.json").read_bytes())
+# Fixed digests/descriptors validate old gh-pages records only.
+LEGACY = json.loads((HERE / "legacy-record-scopes.json").read_bytes())
+PUBLIC_SCOPE = "public-repository-v1"
+MAX_PUBLIC_FINDINGS = 64
+FIXTURES = {"pass", "review", "error", "ci5"}
+REDACTED_FIELDS = ("check_name", "resource_type", "resource", "source_path", "line_start", "line_end")
 SCHEMA = Draft202012Validator(json.loads((HERE.parent/"reporting/gate-result-v1.schema.json").read_bytes()))
 EXIT = {"PASS": 0, "REVIEW": 10, "ERROR": 20}
 STAGES = ("terraform_init","terraform_validate","checkov_scan","feature_extraction","model_scoring")
@@ -85,8 +90,19 @@ def package(blob, expected):
     return data
 
 
+def public_projection(result):
+    if result is None:
+        return None
+    need(SCHEMA.is_valid(result), "Gate export schema does not allow public reporting")
+    # Review projection exposes stable IDs and policy values, never source-derived text.
+    public = dict(result)
+    for group in ("ranked_supported_findings", "unsupported_findings"):
+        public[group] = [dict(row, **dict.fromkeys(REDACTED_FIELDS)) for row in result[group]]
+    return public
+
+
 def validate(e,g,scope):
-    need(scope in DEMO and e["schema_version"]=="ci4-advisory-execution-v1" and
+    need((scope == PUBLIC_SCOPE or scope in LEGACY) and e["schema_version"]=="ci4-advisory-execution-v1" and
          e["enforcement"]=="ADVISORY_ONLY","Execution schema or scope")
     for k in ("github_run_id","github_run_number","github_run_attempt"):
         need(positive(e[k]),"Invalid execution identity")
@@ -99,6 +115,13 @@ def validate(e,g,scope):
     need(e.get("pr_number") is None or positive(e["pr_number"]),"Invalid PR")
     if e.get("process_exit_code") is not None:
         need(type(e["process_exit_code"]) is int and -1<=e["process_exit_code"]<=255,"Process code")
+    general = scope == PUBLIC_SCOPE
+    fixture = e.get("publication_fixture") if general else scope
+    if general:
+        if e.get("trigger_event") == "workflow_dispatch" and e.get("pr_number") is None:
+            need(fixture in FIXTURES, "Expected a trusted fixture for dispatch without PR")
+        else:
+            need(fixture is None, "Unexpected fixture name for PR")
     ctx=e.get("business_context")
     dev=dict(environment="dev",asset_criticality="low",data_sensitivity="low")
     prod=dict(environment="prod",asset_criticality="high",data_sensitivity="high")
@@ -107,9 +130,9 @@ def validate(e,g,scope):
         bc.validate_provenance(provenance, ctx, e.get("context_profile_id"), pr_number=e.get("pr_number"),
                                input_commit=e.get("input_commit_sha"), event=e.get("trigger_event"))
         if provenance["assessment_type"] == "fixture" and e.get("context_profile_id") == "CTX08":
-            need(scope == "ci5", "Fixture profile outside approved scope")
+            need(fixture == "ci5", "Fixture profile outside approved scope")
     else:
-        need(ctx is None or ctx == dev or (scope == "ci5" and e.get("pr_number") is None and ctx == prod), "Legacy context")
+        need(ctx is None or ctx == dev or (fixture == "ci5" and e.get("pr_number") is None and ctx == prod), "Legacy context")
         need(e.get("context_profile_id") in (None, "CTX08" if ctx == prod else "CTX01"), "Legacy profile")
     if g is not None:
         if provenance is None:
@@ -120,7 +143,12 @@ def validate(e,g,scope):
     for k,value in dict(trusted_runtime_commit_sha=RUNTIME,runtime_archive_sha256=ARCHIVE,model_sha256=MODEL,
                         deployment_model_id=MODEL_ID,manifest_sha256=MANIFEST,release_id="ci-gate-v1").items():
         need(e.get(k)==value or (g is None and e.get(k) is None),"Unexpected runtime or model")
-    need(e.get("terraform_artifact_sha256") in (None,DEMO[scope]["input"]),"Unapproved input digest")
+    artifact = e.get("terraform_artifact_sha256")
+    if general:
+        need(artifact is None or (isinstance(artifact, str) and re.fullmatch(r"[0-9a-f]{64}", artifact)),
+             "Invalid Terraform artifact SHA-256")
+    else:
+        need(artifact in (None, LEGACY[scope]["input"]), "Invalid historical Terraform digest")
     need(e.get("fixture_expectation") in (None,"PASS","FAIL") and e.get("model_trust_status") in (None,"verified","not_verified"),"Diagnostics")
     need(e.get("trigger_event") in (None,"workflow_dispatch","workflow_run") and
          e.get("workflow_ref") in (None,"refs/heads/main") and e.get("execution_origin") in (None,"github_actions"),"Trigger metadata")
@@ -137,7 +165,7 @@ def validate(e,g,scope):
              and type(e["gate_exit_code"]) is int and e["gate_exit_code"]==e.get("process_exit_code")==EXIT[state]
              and e.get("gate_result_sha256") is None and e.get("gate_json_sha256") and
              type(e.get("scan_complete")) is bool and (state=="ERROR" or e["scan_complete"])
-             and set(counts)==keys and all(type(n) is int and 0<=n<=64 for n in counts.values())
+             and set(counts)==keys and all(type(n) is int and 0<=n<=MAX_PUBLIC_FINDINGS for n in counts.values())
              and counts["failed_findings_total"]==sum(counts[k] for k in keys-{"failed_findings_total"})
              and (state=="ERROR" or state==("REVIEW" if counts["failed_findings_total"] else "PASS")),
              "Invalid renderer diagnostic")
@@ -146,9 +174,9 @@ def validate(e,g,scope):
         need(e["wrapper_status"]=="ERROR" and e["failure_stage"] and e.get("gate_status") is None and
              all(e.get(k) is None for k in ("gate_exit_code","counts","scan_complete","gate_json_sha256","gate_result_sha256")),"Unverified diagnostic")
         return
-    SCHEMA.validate(g)
+    need(SCHEMA.is_valid(g), "Invalid Gate export schema")
     state=g["gate_status"]
-    need(ctx and e.get("terraform_artifact_sha256")==DEMO[scope]["input"] and
+    need(ctx and artifact is not None and
          e["gate_status"]==state and type(e["gate_exit_code"]) is int and
          e["process_exit_code"]==e["gate_exit_code"]==g["gate_exit_code"]==EXIT[state] and
          e["gate_json_sha256"]==g["source_gate_json_sha256"] and
@@ -161,15 +189,18 @@ def validate(e,g,scope):
         need(all(v=="success" for v in stages.values()) and e["model_trust_status"]=="verified","Incomplete scan")
     scored,others=g["ranked_supported_findings"],g["unsupported_findings"]
     scores=[r["priority_score"] for r in scored]
-    need(len(scored)+len(others)<=64 and scores==sorted(scores,reverse=True),"Ranking order")
+    need(len(scored)+len(others)<=MAX_PUBLIC_FINDINGS and scores==sorted(scores,reverse=True),"Ranking order")
     seen=set()
     for r in scored+others:
-        rule=r["check_id"]
-        desc=DEMO[scope]["descriptors"].get(rule)
-        need(desc is not None and [r[k] for k in ("check_name","resource_type","source_path")]==[desc[0],desc[1],desc[3]]
-             and r["resource"] in (None,desc[2]),"Undisclosed finding fields")
-        need(r["finding_id"] not in seen and all(type(r[k]) is int and 1<=r[k]<=10000 for k in ("line_start","line_end"))
-             and r["line_start"]<=r["line_end"],"Finding identity or span")
+        if general:
+            need(all(r[key] is None for key in REDACTED_FIELDS), "Public finding includes source details")
+        else:
+            desc = LEGACY[scope]["descriptors"].get(r["check_id"])
+            need(desc is not None and [r[k] for k in ("check_name", "resource_type", "source_path")] ==
+                 [desc[0], desc[1], desc[3]] and r["resource"] in (None, desc[2]), "Invalid historical finding fields")
+            need(all(type(r[k]) is int and 1 <= r[k] <= 10000 for k in ("line_start", "line_end"))
+                 and r["line_start"] <= r["line_end"], "Invalid historical finding span")
+        need(r["finding_id"] not in seen, "Duplicate finding identity")
         seen.add(r["finding_id"])
         if r["classification"]=="scored":
             score=r["priority_score"]
@@ -195,6 +226,8 @@ fixture_expectation context_profile_id terraform_artifact_sha256""".split()
 def record(e,g,scope,source_sha,export_sha):
     validate(e,g,scope)
     public={k:e.get(k) for k in FIELDS}
+    if scope == PUBLIC_SCOPE and e.get("publication_fixture") is not None:
+        public["publication_fixture"] = e["publication_fixture"]
     if "context_provenance" in e:
         public["context_provenance"] = e["context_provenance"]
     public["duration_seconds"]=(utc(e["finished_utc"])-utc(e["started_utc"])).total_seconds()

@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -66,8 +67,14 @@ class HistoryTests(unittest.TestCase):
         choose = lambda env: report.gate.trusted_context(env)[:2]
         self.assertEqual(choose({}), ("CTX01", ("dev", "low", "low")))
         values = {"FIXTURE": "ci5", "CI_CONTEXT_PROFILE": "CTX08"}
-        self.assertEqual(choose(dict(values, GITHUB_EVENT_NAME="workflow_run")),
-                         ("CTX01", ("dev", "low", "low")))
+        with tempfile.TemporaryDirectory() as tmp:
+            control = Path(tmp)
+            path = control / "config/business-context.json"
+            path.parent.mkdir()
+            path.write_text(json.dumps(dict(environment="dev", asset_criticality="high", data_sensitivity="low")))
+            with patch.object(report.gate, "CONTROL", control / ".github"):
+                self.assertEqual(choose(dict(values, GITHUB_EVENT_NAME="workflow_run")),
+                                 ("CTX03", ("dev", "high", "low")))
         self.assertEqual(choose(dict(values, GITHUB_EVENT_NAME="workflow_dispatch")),
                          ("CTX08", ("prod", "high", "high")))
         for fixture, profile in (("review", "CTX08"), ("ci5", "invalid")):
@@ -138,7 +145,20 @@ class GateReportTests(unittest.TestCase):
                    GITHUB_EVENT_NAME=event, GITHUB_REF="refs/heads/main", GITHUB_SHA=RUNTIME, PR_SHA=RUNTIME,
                    FIXTURE=name, ARCHIVE_OUTCOME="success", GITHUB_RUN_ID="7", GITHUB_RUN_ATTEMPT="2",
                    GITHUB_RUN_NUMBER="5")
-        proc = subprocess.run([str(self.root/"bundle/runtime/.venv/bin/python"),"-I","-B",str(HERE/"generate_report.py"),
+        entrypoint = HERE / "generate_report.py"
+        if event == "workflow_run":
+            # The archived Gate fixture was scored under CTX01. Keep the test independent of main's config.
+            control = self.base / "control"
+            entrypoint = control / ".github/reporting/generate_report.py"
+            entrypoint.parent.mkdir(parents=True)
+            for name in ("generate_report.py", "render.py", "gate-result-v1.schema.json"):
+                shutil.copyfile(HERE / name, entrypoint.parent / name)
+            for name in ("ci_gate.py", "business_context.py"):
+                shutil.copyfile(HERE.parent / name, entrypoint.parent.parent / name)
+            path = control / "config/business-context.json"
+            path.parent.mkdir()
+            path.write_text(json.dumps(dict(environment="dev", asset_criticality="low", data_sensitivity="low")))
+        proc = subprocess.run([str(self.root/"bundle/runtime/.venv/bin/python"),"-I","-B",str(entrypoint),
                                "--output",str(dest)],env=env,check=True,capture_output=True,text=True)
         record = json.loads((dest/"execution.json").read_bytes())
         self.assertEqual(str(record["wrapper_exit_code"]), proc.stdout.strip())

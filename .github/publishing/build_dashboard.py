@@ -9,7 +9,7 @@ import sys
 import tempfile
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from records import HERE, REPO, digest, html_report, need, parse, record
+from records import HERE, LEGACY, PUBLIC_SCOPE, REPO, digest, html_report, need, parse, public_projection, record
 from publisher import unpack_env
 
 KEY=re.compile(r"reports/([1-9][0-9]{0,19})/attempt-([1-9][0-9]{0,19})/record.json")
@@ -29,7 +29,17 @@ def insert(records,r):
     need(canonical(r)==canonical(verified) and r["repository"]==REPO and
          r["export_digest"]==e["gate_result_sha256"],"Unexpected stored content")
     path=f"reports/{e['github_run_id']}/attempt-{e['github_run_attempt']}/record.json"
-    need(path not in records or canonical(records[path])==canonical(r),"Conflict for existing run/attempt")
+    if path in records and canonical(records[path]) != canonical(r):
+        previous = records[path]
+        if previous["scope"] in LEGACY and r["scope"] == PUBLIC_SCOPE:
+            previous_execution = dict(previous["execution"])
+            if "publication_fixture" in e:
+                previous_execution["publication_fixture"] = e["publication_fixture"]
+            projection = record(previous_execution, public_projection(previous["result"]), PUBLIC_SCOPE,
+                                previous["execution_digest"], previous["export_digest"])
+            if canonical(projection) == canonical(r):
+                return path  # Same artifact replayed under the new policy. Keep historical bytes.
+        raise ValueError("Conflict for existing run/attempt")
     records[path]=r
     return path
 

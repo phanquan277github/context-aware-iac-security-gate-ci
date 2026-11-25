@@ -17,8 +17,8 @@ import business_context as bc
 import ci_gate as gate
 import generate_report as report
 import publisher as pub
-from records import DEMO, digest, parse, record
-from test_publishing import synthetic
+from records import PUBLIC_SCOPE, digest, parse, public_projection, record
+from test_publishing import pr_tree, synthetic
 
 
 class ContextTests(unittest.TestCase):
@@ -95,16 +95,16 @@ class ContextTests(unittest.TestCase):
         run = {"event":"workflow_dispatch","head_sha":"b"*40,"repository":{"id":5}}
         pub.validate_context_origin(e,run)
         expected_pr = {"number":2,"base":{"ref":"main","repo":{"id":5}},"head":{"repo":{"id":5},"sha":"c"*40}}
-        paths = {"pulls/2":expected_pr,
-                 "git/trees/"+"a"*40:{"truncated":False,"tree":[{"path":"terraform","type":"tree","sha":"dir"}]},
-                 "git/trees/dir":{"truncated":False,"tree":[{"path":"main.tf","mode":"100644","sha":DEMO["review"]["blob"]}]}}
+        files = {"network.tf": b"terraform {}"}
+        paths = {"pulls/2": expected_pr, **pr_tree("a"*40, files)}
         with patch.object(pub,"api",side_effect=paths.__getitem__):
-            self.assertEqual(pub.get_scope(e,run),"review")
-            paths["git/trees/dir"]["tree"][0]["sha"]="0"*40
-            self.assertIsNone(pub.get_scope(e,run))
+            self.assertEqual(pub.resolve_input_digest(e,run), pub.artifact_digest(files.items()))
+            expected_pr["head"]["repo"]["id"] = 6
+            with self.assertRaises(ValueError):
+                pub.resolve_input_digest(e,run)
         with self.assertRaises(ValueError):
             pub.validate_context_origin(e,{**run,"head_sha":"d"*40})
-        record(e,r["result"],"review",r["execution_digest"],r["export_digest"])
+        record(e, public_projection(r["result"]), PUBLIC_SCOPE, r["execution_digest"], r["export_digest"])
         api = Mock()
         pub.feedback(r,True,call=api)
         api.assert_not_called()
@@ -138,7 +138,8 @@ class ContextTests(unittest.TestCase):
                 e["context_provenance"] = info
                 g.update(context_provenance=info, business_context=e["business_context"])
                 pub.validate_context_origin(e, {"event": "workflow_dispatch", "head_sha": e["input_commit_sha"]})
-                published = record(e, g, scope, r["execution_digest"], r["export_digest"])
+                e["publication_fixture"] = scope
+                published = record(e, public_projection(g), PUBLIC_SCOPE, r["execution_digest"], r["export_digest"])
                 self.assertEqual(published["execution"]["gate_status"], scope.upper())
                 self.assertFalse(pub.official_pr(e))
 

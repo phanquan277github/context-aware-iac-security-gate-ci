@@ -1,6 +1,7 @@
 """GitHub Actions ingestion and PR feedback. All endpoints are repository-scoped."""
-import argparse
 import base64
+import binascii
+from hashlib import sha1, sha256
 import json
 import os
 from pathlib import Path
@@ -9,11 +10,31 @@ import sys
 import urllib.request as http
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from records import bc, DEMO, REPO, SITE, digest, need, package, parse, positive, record, utc
+from records import (bc, FIXTURES, MAX_PUBLIC_FINDINGS, PUBLIC_SCOPE, REPO, SITE, digest, need, package,
+                     parse, positive, public_projection, record, utc)
 
 MARK = "<!-- context-aware-iac-security-gate -->"
 GATE = ".github/workflows/security-gate.yml"
 SIGNAL = ".github/workflows/security-gate-pr.yml"
+GIT_SHA = re.compile("[0-9a-f]{40}")
+TERRAFORM_NAME = re.compile(r"[A-Za-z0-9_.-]+\.tf")
+MAX_FILES = 64
+MAX_FILE_BYTES = 1024 * 1024
+MAX_INPUT_BYTES = 2 * MAX_FILE_BYTES
+
+
+class PublicationSkipped(ValueError):
+    """Source or report is outside the public repository policy."""
+
+
+def skip_notice(reason):
+    # Only fixed diagnostics may enter Actions logs and the step summary.
+    message = "Publication skipped: " + reason
+    print(message)
+    if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(summary, "a", encoding="utf-8") as stream:
+            print(message, file=stream)
+
 
 
 def api(path, *, method="GET", payload=None, binary=False):
@@ -69,20 +90,95 @@ def validate_context_origin(e, run):
              and bc.values(parse(raw)) == bc.values(e["business_context"]), "Trusted context differs from GitHub blob")
 
 
-def get_scope(e,run):
+def blob_bytes(entry):
+    object_id = entry["sha"]
+    need(isinstance(object_id, str) and GIT_SHA.fullmatch(object_id), "Invalid Terraform blob identity")
+    size = entry["size"]
+    if type(size) is not int or not 0 <= size <= MAX_FILE_BYTES:
+        raise PublicationSkipped("Terraform file size is outside the input contract.")
+    encoding = entry["encoding"]
+    need(encoding == "base64", "Unsupported GitHub Terraform blob encoding")
+    try:
+        data = base64.b64decode("".join(entry["content"].splitlines()), validate=True)
+    except binascii.Error:
+        raise ValueError("Invalid GitHub Terraform blob encoding") from None
+    git_object = f"blob {size}\0".encode() + data
+    need(len(data) == size and sha1(git_object, usedforsecurity=False).hexdigest() == object_id,
+         "Terraform blob differs from GitHub object identity")
+    return data
+
+
+def artifact_digest(files):
+    # D-039 hashes ordered POSIX relative names and bytes as length-prefixed fields.
+    digest = sha256(b"phase8-artifact-v1\0")
+    for name, data in sorted(files):
+        for value in (name.encode("utf-8"), data):
+            digest.update(len(value).to_bytes(8, "big"))
+            digest.update(value)
+    return digest.hexdigest()
+
+
+def pr_digest(sha):
+    root = api(f"git/trees/{sha}")
+    directories = [entry for entry in root["tree"] if entry["path"] == "terraform" and entry["type"] == "tree"]
+    if root["truncated"] or len(directories) != 1:
+        raise PublicationSkipped("Expected a complete Terraform tree at the evaluated commit.")
+    tree_id = directories[0]["sha"]
+    need(GIT_SHA.fullmatch(tree_id), "Invalid Terraform tree identity")
+    tree = api(f"git/trees/{tree_id}")
+    if tree["truncated"]:
+        raise PublicationSkipped("GitHub did not return a complete Terraform directory.")
+    inventory = {}
+    total = 0
+    for entry in tree["tree"]:
+        name = entry["path"]
+        if entry["mode"] not in {"100644", "100755"} or entry["type"] != "blob":
+            raise PublicationSkipped("Terraform directory contains an unsupported tree entry.")
+        if name.endswith((".tf.json", ".tfvars", ".tfvars.json")):
+            raise PublicationSkipped("Terraform directory contains an unsupported file format.")
+        if not name.endswith(".tf"):
+            continue
+        if not TERRAFORM_NAME.fullmatch(name) or name == ".tf":
+            raise PublicationSkipped("Terraform directory contains an unsupported filename.")
+        size = entry["size"]
+        if type(size) is not int or not 0 <= size <= MAX_FILE_BYTES:
+            raise PublicationSkipped("Terraform file size is outside the input contract.")
+        need(name not in inventory and GIT_SHA.fullmatch(entry["sha"]), "Invalid Terraform tree inventory")
+        inventory[name] = entry
+        total += size
+        if len(inventory) > MAX_FILES or total > MAX_INPUT_BYTES:
+            raise PublicationSkipped("Terraform directory exceeds the input contract size limits.")
+    if not inventory:
+        raise PublicationSkipped("Terraform directory contains no supported .tf files.")
+    files = []
+    blobs = {}
+    for name, entry in inventory.items():
+        object_id = entry["sha"]
+        if object_id not in blobs:
+            response = api(f"git/blobs/{object_id}")
+            need(response["sha"] == object_id and response["size"] == entry["size"],
+                 "Terraform blob metadata differs from evaluated tree")
+            blobs[object_id] = blob_bytes(response)
+        need(len(blobs[object_id]) == entry["size"], "Terraform tree size mismatch")
+        files.append((name, blobs[object_id]))
+    return artifact_digest(files)
+
+
+def resolve_input_digest(e, run):
     info = e.get("context_provenance") or {}
     manual_pr = info.get("assessment_type") == "on_demand_pr"
     if run["event"] == "workflow_dispatch" and not manual_pr:
-        need(e.get("pr_number") is None and e.get("input_commit_sha") in (None,run["head_sha"]),"Fixture provenance")
-        name=e.get("publication_fixture")
-        if name not in {"pass","review","error","ci5"}:
-            return None
-        file=api(f"contents/.github/ci_gate_fixtures/{name}/main.tf?ref={run['head_sha']}")
-        return name if file["sha"]==DEMO[name]["blob"] else None
+        need(e.get("pr_number") is None and e.get("input_commit_sha") in (None, run["head_sha"]), "Fixture provenance")
+        name = e.get("publication_fixture")
+        if name not in FIXTURES:
+            raise PublicationSkipped("Dispatch lacks an approved fixture identity or verified PR pin.")
+        fixture = api(f"contents/.github/ci_gate_fixtures/{name}/main.tf?ref={run['head_sha']}")
+        need(fixture["type"] == "file", "Invalid trusted fixture source")
+        return artifact_digest([("main.tf", blob_bytes(fixture))])
     pr = e.get("pr_number")
     sha = e.get("input_commit_sha") or ""
-    if not positive(pr) or not re.fullmatch("[0-9a-f]{40}", sha):
-        return None
+    if not positive(pr) or not GIT_SHA.fullmatch(sha):
+        raise PublicationSkipped("Report lacks the PR number or evaluated PR head SHA.")
     if manual_pr:
         need(run["event"] == "workflow_dispatch" and sha == info["expected_head_sha"]
              and e.get("signal_run_id") is None and e.get("publication_fixture") is None,
@@ -96,7 +192,7 @@ def get_scope(e,run):
     else:
         signal = e.get("signal_run_id")
         if not positive(signal):
-            return None
+            raise PublicationSkipped("Report lacks verified PR signal linkage.")
         source = api(f"actions/runs/{signal}")
         need(source["event"]=="pull_request" and source["conclusion"]=="success" and source["path"]==SIGNAL
              and source["head_sha"]==sha and source["head_repository"]["full_name"]==REPO
@@ -104,18 +200,19 @@ def get_scope(e,run):
         need(any(x["number"]==pr and x["head"]["sha"]==sha and x["base"]["ref"]=="main" and
                  x["head"]["repo"]["id"]==x["base"]["repo"]["id"]==run["repository"]["id"]
                  for x in source["pull_requests"]),"PR association")
-    tree=api("git/trees/"+sha)
-    dirs=[x for x in tree["tree"] if x["path"]=="terraform" and x["type"]=="tree"]
-    if tree["truncated"] or len(dirs)!=1:
-        return None
-    content=api("git/trees/"+dirs[0]["sha"])
-    entries=content["tree"]
-    if content["truncated"] or len(entries)!=1 or entries[0]["path"]!="main.tf" or entries[0]["mode"]!="100644":
-        return None
-    return next((k for k,v in DEMO.items() if v["blob"]==entries[0]["sha"]),None)
+    return pr_digest(sha)
+
+def ingest(number, attempt):
+    try:
+        ingest_verified(number, attempt)
+    except PublicationSkipped as exc:
+        skip_notice(str(exc))
+    except (KeyError, OSError, TypeError, ValueError):
+        skip_notice("Source or report could not be verified. See the publisher error for the failed check.")
+        raise
 
 
-def ingest(number,attempt):
+def ingest_verified(number, attempt):
     need(positive(number) and positive(attempt),"Invalid run or attempt")
     prefix=f"actions/runs/{number}"
     run=api(f"{prefix}/attempts/{attempt}")
@@ -141,17 +238,20 @@ def ingest(number,attempt):
     e=parse(data["execution.json"])
     need((e["github_run_id"],e["github_run_attempt"],e["github_run_number"],e["artifact_name"])==
          (number,attempt,run["run_number"],art["name"]) and e.get("trigger_event",run["event"])==run["event"],"Execution metadata")
-    scope=get_scope(e,run)
-    if scope is None:
-        print("Publication skipped: input outside approved demo scope or missing linkage")
-        return
-    g=parse(data["gate-result.json"]) if "gate-result.json" in data else None
-    export=digest(data["gate-result.json"]) if g is not None else None
-    need(export==e.get("gate_result_sha256"),"Export checksum")
+    g = parse(data["gate-result.json"]) if "gate-result.json" in data else None
+    export = digest(data["gate-result.json"]) if g is not None else None
+    need(export == e.get("gate_result_sha256"), "Export checksum")
     if e.get("trigger_event") is None and g is None:
-        e["trigger_event"]=run["event"]
+        e["trigger_event"] = run["event"]
+    evaluated_digest = resolve_input_digest(e, run)
+    if g is not None or e.get("terraform_artifact_sha256") is not None:
+        need(e.get("terraform_artifact_sha256") == evaluated_digest,
+             "Terraform artifact SHA-256 differs from the evaluated revision")
     validate_context_origin(e, run)
-    result=record(e,g,scope,digest(data["execution.json"]),export)
+    projected = public_projection(g)
+    if projected and sum(len(projected[key]) for key in ("ranked_supported_findings", "unsupported_findings")) > MAX_PUBLIC_FINDINGS:
+        raise PublicationSkipped(f"Report exceeds the {MAX_PUBLIC_FINDINGS}-finding public report limit.")
+    result = record(e, projected, PUBLIC_SCOPE, digest(data["execution.json"]), export)
     outputs(ready="yes", payload=packed(result), pr=(e.get("pr_number") or "") if official_pr(e) else "")
 
 

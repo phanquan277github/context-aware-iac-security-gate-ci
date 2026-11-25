@@ -47,7 +47,7 @@
 !/.github/publishing/publisher.py
 !/.github/publishing/records.py
 !/.github/publishing/build_dashboard.py
-!/.github/publishing/demo-scope.json
+!/.github/publishing/legacy-record-scopes.json
 !/.github/publishing/test_publishing.py
 !/dashboard/
 /dashboard/*

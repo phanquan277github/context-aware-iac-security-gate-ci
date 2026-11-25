@@ -48,7 +48,15 @@ Khi PR trong cùng repository nhắm vào `main` và thay đổi `terraform/**`,
 
 ## Dashboard và phản hồi PR (CI-4E)
 
-Publisher nhận sự kiện hoàn tất của **Security Gate advisory**, bao gồm REVIEW và ERROR. Quyền công bố giới hạn ở các fixture tổng hợp trong [demo-scope.json](.github/publishing/demo-scope.json). Với PR tự động, phải đối chiếu được signal thuộc cùng repository. Với PR giả định, publisher xác minh PR và SHA đã pin dựa trên provenance của Gate trên `main`. Với cả hai, thư mục `terraform/` tại commit đó phải chứa đúng blob `main.tf` đã duyệt. Với fixture dispatch, publisher kiểm blob ở revision điều khiển. Thiếu bằng chứng sẽ bỏ qua hoặc báo lỗi ở publisher; artifact CI-4 vẫn theo quy trình Gate.
+Publisher nhận sự kiện hoàn tất của **Security Gate advisory**, bao gồm REVIEW và ERROR. Repository học thuật công khai cho phép xuất bản báo cáo đã lọc của các lượt đủ provenance trên cùng repository. Với PR tự động, publisher kiểm signal, repository, PR và commit. Với PR giả định, publisher kiểm pin SHA từ Gate tin cậy trên `main`. Publisher tính lại Terraform artifact SHA-256 từ các blob tại đúng commit và đối chiếu với báo cáo. Hệ thống áp dụng cùng kiểm tra byte cho fixture tin cậy. Record và HTML lịch sử được giữ theo run/attempt.
+
+### Quy trình Developer
+
+1. Tự tạo Terraform dưới thư mục `terraform/` ở nhánh của cùng repository. Đặt 1–64 file `.tf` hợp lệ trực tiếp trong thư mục này. Giới hạn mỗi file 1 MiB và tổng 2 MiB. Input scope hiện tại dùng loại file thường và tên ASCII chữ, số, dấu gạch, dấu chấm hoặc underscore. Nested directories, symlink, submodule, `.tf.json`, `.tfvars` và `.tfvars.json` nằm ngoài contract. Terraform dành cho repository công khai.
+2. Qua Git, commit, push và mở PR vào `main`. Gate tự chạy cho thay đổi `terraform/**`. Quy trình chấp nhận Terraform mới khi đáp ứng input contract, kể cả cấu hình do công cụ sinh ra.
+3. Đối chiếu SHA trong Job Summary hoặc bot comment, rồi mở báo cáo trên Pages. Lịch sử tìm được theo PR, run hoặc SHA. Khi không công bố được, xem thông báo **Publication skipped** hoặc lỗi trong workflow **Publish advisory security report** và lấy artifact CI-4 từ Gate run.
+4. Báo cáo công khai chứa rule ID, finding digest, phân loại, các giá trị feature trong schema, điểm và hạng. Tên resource, tên/đường dẫn nguồn, span và tiêu đề từ scanner được lược khỏi projection mới. Terraform thô, credentials, raw Gate JSON và log thô nằm ngoài dữ liệu công bố. Bản công khai giữ checksum Gate export gốc để đối chiếu artifact CI-4. Giới hạn hồ sơ công khai là 64 findings; kết quả lớn hơn hoặc thiếu bằng chứng vẫn giữ Gate outcome và artifact nếu upload thành công.
+
 
 ### Bật Pages và kiểm thử
 
@@ -73,7 +81,7 @@ Dashboard dùng tệp tĩnh và tải `history.json` qua HTTP. Bản mẫu cục
 
 D-039 dùng `dev/prod` cho `environment`, `low/high` cho `asset_criticality` và `data_sensitivity`. Chủ workload cập nhật đúng ba trường trên `main`. Các đánh giá tự động tiếp theo đọc revision mới. Muốn đánh giá lại PR đang mở, cần một sự kiện PR đủ điều kiện. Config sai hoặc thiếu sinh diagnostic `BUSINESS_CONTEXT` với wrapper ERROR/20. Trang công khai giữ các báo cáo đã được công bố.
 
-Đánh giá giả định xác minh PR còn mở và thuộc cùng repository, nhắm `main`, cùng SHA với `expected_head_sha` trước khi checkout. Context được truyền trực tiếp tới Gate D-039 từ workflow tin cậy. Execution và Gate export có `context_provenance` phiên bản `ci5c-context-v1`, gồm loại đánh giá, nguồn context, revision điều khiển, hash config khi có và pin của PR giả định. Report ghi các giá trị context thật và profile tương ứng. Hạn chế công bố ở đúng blob demo trong allowlist hiện tại áp dụng cho cả ba loại.
+Đánh giá giả định xác minh PR còn mở và thuộc cùng repository, nhắm `main`, cùng SHA với `expected_head_sha` trước khi checkout. Context được truyền trực tiếp tới Gate D-039 từ workflow tin cậy. Execution và Gate export có `context_provenance` phiên bản `ci5c-context-v1`, gồm loại đánh giá, nguồn context, revision điều khiển, hash config khi có và pin của PR giả định. Report ghi các giá trị context thật và profile tương ứng. Chính sách công bố cấp repository phía trên áp dụng cho cả ba loại. Lượt PR giả định đủ điều kiện xuất hiện trên dashboard và dùng được trong so sánh.
 
 Mục **So sánh bối cảnh** yêu cầu cùng artifact Terraform và commit đã quét, cùng runtime/model và schema tương thích, hai scan chấm điểm hoàn tất và context khác nhau. Đối chiếu `finding_id` một-một và đặc trưng kỹ thuật. Finding ngoài phạm vi hiển thị riêng với điểm/hạng trống. Số điểm thay đổi dùng ngưỡng tuyệt đối `1e-12` trên số gốc. Hạng và tie lấy từ export. Điểm ưu tiên có thể tăng hoặc giảm khi bối cảnh thay đổi.
 

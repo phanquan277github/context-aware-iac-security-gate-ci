@@ -1,6 +1,7 @@
 """Local publication acceptance. CI4_HOSTED_ROOT points to the three downloaded CI-4 archives."""
 import copy
 import io
+from hashlib import sha1
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,25 @@ import build_dashboard as site
 from records import *
 
 
+def git_blob(data):
+    header = f"blob {len(data)}\0".encode()
+    return dict(sha=sha1(header + data, usedforsecurity=False).hexdigest(), size=len(data),
+                encoding="base64", content=pub.base64.b64encode(data).decode())
+
+
+def pr_tree(sha, files):
+    directory = "d" * 40
+    entries = []
+    responses = {f"git/trees/{sha}": {"truncated": False, "tree": [
+        dict(path="terraform", type="tree", mode="040000", sha=directory)]}}
+    for filename, data in files.items():
+        blob = git_blob(data)
+        entries.append(dict(path=filename, sha=blob["sha"], size=blob["size"], mode="100644", type="blob"))
+        responses["git/blobs/" + blob["sha"]] = blob
+    responses["git/trees/" + directory] = dict(truncated=False, tree=entries)
+    return responses
+
+
 def synthetic(scope):
     """Portable unit sample. Only the optional archive reader below uses hosted bytes."""
     ctx=dict(environment="dev",asset_criticality="low",data_sensitivity="low")
@@ -29,7 +49,7 @@ def synthetic(scope):
                       privilege_impact="not_applicable",resource_role="network",logging_missing="yes",
                       public_access="not_applicable",wildcard_action="not_applicable",
                       wildcard_resource="not_applicable",encryption_missing="not_applicable")
-        for rule,desc in DEMO[scope]["descriptors"].items():
+        for rule,desc in LEGACY[scope]["descriptors"].items():
             supported=rule=="CKV2_AWS_11"
             row=dict(finding_id=("1" if supported else "2")*64,check_id=rule,check_name=desc[0],
                      resource_type=desc[1],resource=desc[2],source_path=desc[3],line_start=1,line_end=2,
@@ -55,7 +75,7 @@ def synthetic(scope):
            process_exit_code=code,wrapper_status=scope.upper(),wrapper_exit_code=code,failure_stage="GATE" if failed else None,
            gate_json_sha256="a"*64,gate_result_sha256=export,counts=counts,scan_complete=not failed,runtime_archive_sha256=ARCHIVE,
            deployment_model_id=MODEL_ID,model_trust_status="not_verified" if failed else "verified",context_profile_id="CTX01",
-           terraform_artifact_sha256=DEMO[scope]["input"],fixture_expectation="PASS")
+           terraform_artifact_sha256=LEGACY[scope]["input"],fixture_expectation="PASS")
     return record(e,g,scope,digest(site.canonical(e)),export)
 
 
@@ -70,7 +90,7 @@ def samples():
         data=package(path.read_bytes(),metadata["artifact"]["digest"])
         e=parse(data["execution.json"])
         # Replay old artifacts locally with the new input attestation. Never send this to GitHub.
-        e.update(terraform_artifact_sha256=DEMO[scope]["input"],publication_fixture=scope)
+        e.update(terraform_artifact_sha256=LEGACY[scope]["input"],publication_fixture=scope)
         g=parse(data["gate-result.json"])
         yield scope,record(e,g,scope,digest(data["execution.json"]),digest(data["gate-result.json"]))
 
@@ -183,11 +203,12 @@ class PublishingTests(unittest.TestCase):
         for k,v in [("id",9),("run_attempt",1),("path","other"),("head_branch","feature"),("workflow_id",12),("event","pull_request")]:
             with self.subTest(k=k),self.assertRaises(ValueError):
                 pub.accepted_run(dict(run,**{k:v}),10,2,11)
-        with patch.object(pub,"api",return_value={"sha":DEMO["review"]["blob"]}):
-            self.assertEqual(pub.get_scope(dict(publication_fixture="review",input_commit_sha="a"*40),run),"review")
-        with patch.object(pub,"api",return_value={"sha":"0"*40}):
-            self.assertIsNone(pub.get_scope(dict(publication_fixture="review"),run))
-        self.assertIsNone(pub.get_scope({},run))
+        source = b'terraform {}\n'
+        with patch.object(pub,"api",return_value={**git_blob(source), "type": "file"}):
+            resolved = pub.resolve_input_digest(dict(publication_fixture="review",input_commit_sha="a"*40),run)
+            self.assertEqual(resolved, pub.artifact_digest([("main.tf", source)]))
+        with self.assertRaises(pub.PublicationSkipped):
+            pub.resolve_input_digest({},run)
 
     def test_feedback(self):
         for case,want in [("create","POST"),("user-marker","POST"),("update","PATCH"),("stale",None),
@@ -215,7 +236,9 @@ class PublishingTests(unittest.TestCase):
 
     def test_recovery_ingests_same_artifact_and_refuses_wrong_attempt(self):
         from zipfile import ZIP_DEFLATED
-        e=dict(self.e,publication_fixture="review")
+        file = (HERE.parent / "ci_gate_fixtures/review/main.tf").read_bytes()
+        e = dict(self.e, publication_fixture="review",
+                 terraform_artifact_sha256=pub.artifact_digest([("main.tf", file)]))
         data={"execution.json":site.canonical(e),"gate-result.json":site.canonical(self.g),
               "report.md":b"[unsafe](https://invalid)", "report.html":b"<script>unsafe()</script>"}
         e["gate_result_sha256"]=digest(data["gate-result.json"])
@@ -241,32 +264,78 @@ class PublishingTests(unittest.TestCase):
                    prefix+"/artifacts?per_page=100":{"total_count":1,"artifacts":[art]},
                    prefix+"/attempts/1/jobs":{"jobs":[dict(run_attempt=1,started_at=e["started_utc"],completed_at=e["finished_utc"],
                    steps=[dict(name="Upload the run record for PASS, REVIEW or ERROR",conclusion="success")])]},
-                   "actions/artifacts/5/zip":blob,f"contents/.github/ci_gate_fixtures/review/main.tf?ref={sha}":{"sha":DEMO["review"]["blob"]}}
+                   "actions/artifacts/5/zip":blob,f"contents/.github/ci_gate_fixtures/review/main.tf?ref={sha}":{**git_blob(file), "type": "file"}}
         with patch.object(pub,"api",side_effect=lambda path,**kw:responses[path]),patch.object(pub,"outputs") as output,patch.dict(os.environ,GITHUB_SHA=sha):
             pub.ingest(rid,1)
             body=parse(pub.base64.b64decode(output.call_args.kwargs["payload"]))
             self.assertNotIn("unsafe",str(body))
             self.assertEqual(body["execution"]["gate_status"],"REVIEW")
+            self.assertEqual(body["scope"], PUBLIC_SCOPE)
+            self.assertTrue(all(row[key] is None for key in REDACTED_FIELDS
+                                for row in body["result"]["ranked_supported_findings"]))
+            self.assertEqual(body["export_digest"], e["gate_result_sha256"])
+            path = f"contents/.github/ci_gate_fixtures/review/main.tf?ref={sha}"
+            responses[path] = {**git_blob(file + b"\n"), "type": "file"}
+            with self.assertRaisesRegex(ValueError, "differs from the evaluated revision"):
+                pub.ingest(rid, 1)
+            # A disallowed input yields a safe diagnostic and leaves the verified Gate artifact alone.
+            reason = "Terraform directory contains an unsupported tree entry."
+            responses[path] = {**git_blob(file), "type": "file"}
+            with patch.object(pub, "resolve_input_digest", side_effect=pub.PublicationSkipped(reason)), \
+                 patch.object(pub, "skip_notice") as notice:
+                pub.ingest(rid, 1)
+                notice.assert_called_once_with(reason)
+                self.assertEqual(output.call_count, 1)
             art["workflow_run"]["id"]+=1
             with self.assertRaises(ValueError):pub.ingest(rid,1)
             self.assertEqual(output.call_count,1)
 
-    def test_pr_input_is_bound_to_signal_and_single_demo_blob(self):
-        run={"event":"workflow_run","repository":{"id":3}}
-        sha=self.e["input_commit_sha"]
-        signal=dict(event="pull_request",conclusion="success",path=pub.SIGNAL,head_sha=sha,workflow_id=12,
-                    head_repository={"full_name":REPO},pull_requests=[dict(number=9,head=dict(sha=sha,repo={"id":3}),
-                    base=dict(ref="main",repo={"id":3}))])
-        tree=dict(truncated=False,tree=[dict(type="blob",mode="100644",path="main.tf",sha=DEMO["review"]["blob"])])
-        responses={"actions/runs/8":signal,"actions/workflows/security-gate-pr.yml":{"id":12},
-                   f"git/trees/{sha}":{"truncated":False,"tree":[dict(path="terraform",type="tree",sha="d"*40)]},
-                   "git/trees/"+"d"*40:tree}
+    def test_pr_digest_bound_to_signal_supports_unregistered_multifile_input(self):
+        run = {"event":"workflow_run", "repository":{"id":3}}
+        sha = self.e["input_commit_sha"]
+        signal = dict(event="pull_request", conclusion="success", path=pub.SIGNAL, head_sha=sha, workflow_id=12,
+                      head_repository={"full_name":REPO}, pull_requests=[dict(number=9, head=dict(sha=sha, repo={"id":3}),
+                      base=dict(ref="main", repo={"id":3}))])
+        files = {"network.tf": b"# arbitrary source bytes", "providers.tf": b"terraform {}"}
+        responses = pr_tree(sha, files)
+        responses.update({"actions/runs/8":signal, "actions/workflows/security-gate-pr.yml":{"id":12}})
+        e = dict(self.e, signal_run_id=8, pr_number=9)
         with patch.object(pub,"api",side_effect=responses.__getitem__):
-            e=dict(self.e,signal_run_id=8,pr_number=9)
-            self.assertEqual(pub.get_scope(e,run),"review")
-            tree["tree"].append(dict(type="blob",path="private.tf"))
-            self.assertIsNone(pub.get_scope(e,run))
-            with self.assertRaises(ValueError):pub.get_scope(dict(e,pr_number=99),run)
+            resolved = pub.resolve_input_digest(e,run)
+            self.assertEqual(resolved, pub.artifact_digest(files.items()))
+            self.assertNotIn(resolved, {row["input"] for row in LEGACY.values()})
+            with self.assertRaises(ValueError):
+                pub.resolve_input_digest(dict(e,pr_number=99),run)
+            table = responses["git/trees/" + "d"*40]["tree"]
+            for mode, name in [("120000","symlink.tf"), ("040000","nested"), ("100644","vars.tfvars"),
+                               ("100644","name with space.tf")]:
+                with self.subTest(mode=mode,name=name):
+                    table.append(dict(type="blob",mode=mode,path=name,size=1))
+                    with self.assertRaises(pub.PublicationSkipped):
+                        pub.resolve_input_digest(e,run)
+                    table.pop()
+            oid = table[0]["sha"]
+            responses["git/blobs/"+oid]["content"] = pub.base64.b64encode(b"x" * table[0]["size"]).decode()
+            with self.assertRaisesRegex(ValueError, "differs from GitHub object identity"):
+                pub.resolve_input_digest(e,run)
+
+    def test_public_projection_is_strict_and_history_keeps_original_bytes(self):
+        prior = self.r
+        projected = public_projection(prior["result"])
+        public = record(dict(prior["execution"], publication_fixture="review"), projected, PUBLIC_SCOPE,
+                        prior["execution_digest"], prior["export_digest"])
+        self.assertNotEqual(projected, prior["result"])
+        records = {}
+        key = site.insert(records, prior)
+        self.assertEqual(site.insert(records, public), key)
+        self.assertEqual(records[key], prior)
+        malicious = copy.deepcopy(projected)
+        malicious["ranked_supported_findings"][0]["check_name"] = "synthetic secret"
+        with self.assertRaisesRegex(ValueError, "source details"):
+            record(public["execution"], malicious, PUBLIC_SCOPE, public["execution_digest"], public["export_digest"])
+        malicious["ranked_supported_findings"][0]["secret"] = "synthetic secret"
+        with self.assertRaisesRegex(ValueError, "Gate export schema"):
+            public_projection(malicious)
 
     def test_fail_closed_before_feedback(self):
         original=copy.deepcopy(self.e)

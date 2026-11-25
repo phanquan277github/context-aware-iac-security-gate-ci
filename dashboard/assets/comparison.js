@@ -38,9 +38,11 @@ const ContextComparison = (() => {
   }
 
   function comparable(x, y) {
-    const fields = ["check_id", "classification", "severity_numeric", "resource_type",
-      "source_path", "line_start", "line_end", "unsupported_reason"];
+    const fields = ["check_id", "classification", "severity_numeric", "unsupported_reason"];
     if (fields.some(key => x[key] !== y[key])) return false;
+    // The stable ID binds source location and resource identity when public display fields are redacted.
+    const locationFields = ["resource_type", "source_path", "line_start", "line_end"];
+    if (locationFields.some(key => x[key] != null && y[key] != null && x[key] !== y[key])) return false;
     if (x.classification !== "scored") return x.context_features === null && y.context_features === null;
     const a = x.context_features;
     const b = y.context_features;
