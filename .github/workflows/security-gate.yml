@@ -2,7 +2,7 @@ name: Security Gate advisory
 
 on:
   workflow_run:
-    workflows: [Security Gate PR signal]
+    workflows: [Security Gate PR signal, Security Gate push signal]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -50,7 +50,8 @@ permissions:
 jobs:
   advisory:
     if: >-
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'workflow_run' && github.ref == 'refs/heads/main' &&
+       github.event.workflow_run.conclusion == 'success') ||
       (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' &&
        github.ref_name == 'main' && github.event.repository.default_branch == 'main')
     runs-on: ubuntu-24.04
@@ -99,7 +100,7 @@ jobs:
           submodules: false
           lfs: false
 
-      - name: Resolve PR input and check trusted release pins
+      - name: Resolve input and check trusted release pins
         id: pins
         env:
           FIXTURE: ${{ inputs.fixture }}
@@ -111,7 +112,9 @@ jobs:
           [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 && "$(uname -m)" == x86_64 ]]
           [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]
           if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
-            python3 -I -B trusted-control/.github/ci_gate.py resolve-pr >> "$GITHUB_OUTPUT"
+            resolved="$(python3 -I -B trusted-control/.github/ci_gate.py resolve-signal)"
+            printf '%s\n' "$resolved" >> "$GITHUB_OUTPUT"
+            [[ "$resolved" != skip=yes ]] || exit 0
           elif [[ "$CI_ASSESSMENT_MODE" == on_demand_pr ]]; then
             python3 -I -B trusted-control/.github/ci_gate.py resolve-manual-pr >> "$GITHUB_OUTPUT"
           fi
@@ -122,6 +125,7 @@ jobs:
             { echo 'Trusted Ubuntu OCI digest missing or invalid.'; exit 1; }
 
       - name: Check out the independently pinned release commit
+        if: steps.pins.outputs.skip != 'yes'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RUNTIME_SHA }}
@@ -133,6 +137,7 @@ jobs:
           sparse-checkout: /security_gate_payload/ci-gate-v1.tar
 
       - name: Verify and unpack the trusted runtime
+        if: steps.pins.outputs.skip != 'yes'
         id: archive
         run: |
           [[ "$(git -C trusted-release rev-parse HEAD)" == "$RUNTIME_SHA" ]]
@@ -140,6 +145,7 @@ jobs:
             trusted-release/security_gate_payload/ci-gate-v1.tar "$RUNTIME_ARCHIVE_SHA" "$BUNDLE_DIR"
 
       - name: Provision exact CPython
+        if: steps.pins.outputs.skip != 'yes'
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12.3'
@@ -148,6 +154,7 @@ jobs:
           token: ''
 
       - name: Provision the CI-3B0 toolchain
+        if: steps.pins.outputs.skip != 'yes'
         id: provision
         env:
           PIP_CONFIG_FILE: /dev/null
@@ -159,30 +166,35 @@ jobs:
           done
           docker pull --platform linux/amd64 "$UBUNTU_IMAGE"
 
-      - name: Check out the exact Terraform PR head in a separate directory
+      - name: Check out the exact Terraform commit in a separate directory
         if: steps.pins.outputs.sha != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.pins.outputs.sha }}
-          path: pr-source
+          path: terraform-source
           persist-credentials: false
           submodules: false
           lfs: false
           sparse-checkout: terraform
 
       - name: Stage only bounded Terraform blobs or a trusted fixture
+        if: steps.pins.outputs.skip != 'yes'
         id: input
         env:
           PR_SHA: ${{ steps.pins.outputs.sha }}
           FIXTURE: ${{ inputs.fixture }}
         run: |
           if [[ -n "$PR_SHA" ]]; then
-            python -I -B trusted-control/.github/ci_gate.py stage pr-source "$PR_SHA" "$RUN_ROOT/input"
-          else
+            python -I -B trusted-control/.github/ci_gate.py stage terraform-source "$PR_SHA" "$RUN_ROOT/input"
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$CI_ASSESSMENT_MODE" != on_demand_pr ]]; then
             python -I -B trusted-control/.github/ci_gate.py fixture "$FIXTURE" "$RUN_ROOT/input"
+          else
+            echo 'Missing pinned Terraform revision.' >&2
+            exit 1
           fi
 
       - name: Run the parity Gate in an offline read-only sandbox
+        if: steps.pins.outputs.skip != 'yes'
         id: gate
         env:
           GATE_ENVIRONMENT: ${{ steps.pins.outputs.environment }}
@@ -220,7 +232,7 @@ jobs:
 
       - name: Verify Gate and generate offline advisory reports
         id: report
-        if: ${{ always() && steps.workspace.outcome == 'success' }}
+        if: ${{ always() && steps.workspace.outcome == 'success' && steps.pins.outputs.skip != 'yes' }}
         env:
           GATE_EXIT: ${{ steps.gate.outputs.exit }}
           PR_SHA: ${{ steps.pins.outputs.sha }}
@@ -298,8 +310,12 @@ jobs:
           retention-days: 30
           overwrite: false
 
+      - name: Skip push covered by the official PR lane
+        if: steps.pins.outputs.skip == 'yes'
+        run: echo 'Push assessment skipped. An eligible open Terraform PR covers the same commit.' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Finish with the verified advisory process status
-        if: ${{ always() }}
+        if: ${{ always() && steps.pins.outputs.skip != 'yes' }}
         env:
           ADVISORY_EXIT: ${{ steps.report.outputs.exit }}
           UPLOAD_OUTCOME: ${{ steps.upload.outcome }}

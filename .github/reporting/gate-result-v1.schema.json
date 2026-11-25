@@ -18,10 +18,11 @@
       "required": ["schema_version", "assessment_type", "context_source", "control_revision", "configuration_sha256", "expected_head_sha"],
       "properties": {
         "schema_version": {"const": "ci5c-context-v1"},
-        "assessment_type": {"enum": ["automatic_pr", "on_demand_pr", "fixture"]},
+        "assessment_type": {"enum": ["automatic_pr", "automatic_push", "on_demand_pr", "fixture"]},
         "context_source": {"enum": ["trusted_workload_config", "dispatch_parameters", "trusted_fixture_profile"]},
         "control_revision": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
         "configuration_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "source_branch": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}$"},
         "expected_head_sha": {"type": ["string", "null"], "pattern": "^[a-f0-9]{40}$"}
       },
       "additionalProperties": false

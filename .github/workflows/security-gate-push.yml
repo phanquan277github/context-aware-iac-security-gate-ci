@@ -1,0 +1,38 @@
+name: Security Gate push signal
+
+on:
+  push:
+    branches: ['**', '!gh-pages']
+    paths: ['terraform/**']
+
+permissions:
+  contents: read
+
+jobs:
+  signal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BEFORE: ${{ github.event.before }}
+      AFTER: ${{ github.event.after }}
+      DELETED: ${{ github.event.deleted }}
+    steps:
+      - name: Confirm a Terraform tree change
+        shell: bash
+        run: |
+          [[ "$DELETED" != true && "$AFTER" =~ ^[0-9a-f]{40}$ && "$AFTER" == "$GITHUB_SHA" ]]
+          [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]]
+          # For a new branch GitHub's push paths filter determines the comparison base.
+          if [[ "$BEFORE" != 0000000000000000000000000000000000000000 ]]; then
+            read_tree() {
+              gh api "repos/$GITHUB_REPOSITORY/git/trees/$1" --jq 'if .truncated then error("Incomplete commit tree") else [.tree[] | select(.path == "terraform") | [.mode,.sha]] | tostring end'
+            }
+            before="$(read_tree "$BEFORE")"
+            after="$(read_tree "$AFTER")"
+            if [[ "$before" == "$after" ]]; then
+              echo 'No effective change under terraform/.'
+              exit 1
+            fi
+          fi
+          echo 'Terraform push signal. The default-branch workflow handles the scan.'

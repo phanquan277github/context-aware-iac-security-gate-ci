@@ -13,6 +13,8 @@
 !/.github/workflows/toolchain-smoke.yml
 !/.github/workflows/security-gate.yml
 !/.github/workflows/security-gate-pr.yml
+!/.github/workflows/security-gate-push.yml
+!/.github/push_assessment.py
 !/.github/ci_gate.py
 !/.github/ci_gate_fixtures/
 /.github/ci_gate_fixtures/*
@@ -59,7 +61,14 @@
 
 !/.github/business_context.py
 !/.github/publishing/test_context_assessments.py
+!/.github/publishing/test_push_assessment.py
 !/config/
 /config/*
 !/config/business-context.json
 !/dashboard/assets/comparison.js
+
+# Workload inputs. Track flat HCL source while keeping local state and inputs ignored.
+!/terraform/
+/terraform/*
+!/terraform/*.tf
+/terraform/*/

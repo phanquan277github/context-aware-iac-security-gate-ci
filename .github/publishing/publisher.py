@@ -12,6 +12,7 @@ import urllib.request as http
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from records import (bc, FIXTURES, MAX_PUBLIC_FINDINGS, PUBLIC_SCOPE, REPO, SITE, digest, need, package,
                      parse, positive, public_projection, record, utc)
+import push_assessment as push
 
 MARK = "<!-- context-aware-iac-security-gate -->"
 GATE = ".github/workflows/security-gate.yml"
@@ -81,7 +82,7 @@ def validate_context_origin(e, run):
                            pr_number=e.get("pr_number"), input_commit=e.get("input_commit_sha"), event=run["event"])
     revision = info["control_revision"]
     need(revision == run["head_sha"], "Context revision differs from trusted Gate run")
-    if info["assessment_type"] == "automatic_pr":
+    if info["assessment_type"] in {"automatic_pr", "automatic_push"}:
         file = api(f"contents/{bc.CONFIG}?ref={revision}")
         need(file["type"] == "file" and file["encoding"] == "base64" and 0 < file["size"] <= 4096,
              "Unexpected trusted context file")
@@ -166,6 +167,17 @@ def pr_digest(sha):
 
 def resolve_input_digest(e, run):
     info = e.get("context_provenance") or {}
+    if info.get("assessment_type") == "automatic_push":
+        signal = e.get("signal_run_id")
+        need(run["event"] == "workflow_run" and positive(signal) and e.get("pr_number") is None
+             and e.get("publication_fixture") is None, "Push report linkage")
+        source = api(f"actions/runs/{signal}")
+        branch, sha = push.source_identity(source, run["repository"]["id"])
+        need(branch == info["source_branch"] and sha == e.get("input_commit_sha") == info["expected_head_sha"]
+             and source["workflow_id"] == api(f"actions/workflows/{push.SIGNAL_PATH.rsplit('/', 1)[1]}")["id"]
+             and source["repository"]["id"] == run["repository"]["id"]
+             and source["head_repository"]["full_name"] == REPO, "Push signal identity")
+        return pr_digest(sha)
     manual_pr = info.get("assessment_type") == "on_demand_pr"
     if run["event"] == "workflow_dispatch" and not manual_pr:
         need(e.get("pr_number") is None and e.get("input_commit_sha") in (None, run["head_sha"]), "Fixture provenance")
@@ -224,15 +236,21 @@ def ingest_verified(number, attempt):
     need(listing["total_count"]==len(listing["artifacts"]),"Artifact listing incomplete")
     pattern=rf"security-gate-[0-9]{{8}}T[0-9]{{6}}Z_run-{number}_attempt-{attempt}"
     matches=[a for a in listing["artifacts"] if re.fullmatch(pattern,a["name"])]
+    jobs=api(f"{prefix}/attempts/{attempt}/jobs")["jobs"]
+    need(len(jobs)==1 and jobs[0]["run_attempt"]==attempt,"Unexpected Gate job identity")
+    job=jobs[0]
+    if (not matches and run["event"] == "workflow_run" and run.get("conclusion") == "success"
+            and any(step["name"] == "Skip push covered by the official PR lane" and step["conclusion"] == "success"
+                    for step in job["steps"])):
+        skip_notice("An eligible open PR covers the exact pushed revision.")
+        return
     need(len(matches)==1,"Exact attempt artifact unavailable")
     art=matches[0]
     provenance=art["workflow_run"]
     need(not art["expired"] and provenance["id"]==number and provenance["head_sha"]==run["head_sha"] and
          provenance["repository_id"]==provenance["head_repository_id"]==run["repository"]["id"],"Artifact provenance")
-    jobs=api(f"{prefix}/attempts/{attempt}/jobs")["jobs"]
-    need(len(jobs)==1 and jobs[0]["run_attempt"]==attempt and any(x["name"]=="Upload the run record for PASS, REVIEW or ERROR"
-         and x["conclusion"]=="success" for x in jobs[0]["steps"]),"Missing trusted upload")
-    job=jobs[0]
+    need(any(x["name"]=="Upload the run record for PASS, REVIEW or ERROR"
+             and x["conclusion"]=="success" for x in job["steps"]),"Missing trusted upload")
     need(utc(job["started_at"]) <= utc(art["created_at"]) <= utc(job["completed_at"]),"Artifact outside trusted attempt")
     data=package(api(f"actions/artifacts/{art['id']}/zip",binary=True),art["digest"])
     e=parse(data["execution.json"])

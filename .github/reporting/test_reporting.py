@@ -153,7 +153,7 @@ class GateReportTests(unittest.TestCase):
             entrypoint.parent.mkdir(parents=True)
             for name in ("generate_report.py", "render.py", "gate-result-v1.schema.json"):
                 shutil.copyfile(HERE / name, entrypoint.parent / name)
-            for name in ("ci_gate.py", "business_context.py"):
+            for name in ("ci_gate.py", "business_context.py", "push_assessment.py"):
                 shutil.copyfile(HERE.parent / name, entrypoint.parent.parent / name)
             path = control / "config/business-context.json"
             path.parent.mkdir()

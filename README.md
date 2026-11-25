@@ -52,11 +52,14 @@ Publisher nhận sự kiện hoàn tất của **Security Gate advisory**, bao g
 
 ### Quy trình Developer
 
-1. Tự tạo Terraform dưới thư mục `terraform/` ở nhánh của cùng repository. Đặt 1–64 file `.tf` hợp lệ trực tiếp trong thư mục này. Giới hạn mỗi file 1 MiB và tổng 2 MiB. Input scope hiện tại dùng loại file thường và tên ASCII chữ, số, dấu gạch, dấu chấm hoặc underscore. Nested directories, symlink, submodule, `.tf.json`, `.tfvars` và `.tfvars.json` nằm ngoài contract. Terraform dành cho repository công khai.
-2. Qua Git, commit, push và mở PR vào `main`. Gate tự chạy cho thay đổi `terraform/**`. Quy trình chấp nhận Terraform mới khi đáp ứng input contract, kể cả cấu hình do công cụ sinh ra.
-3. Đối chiếu SHA trong Job Summary hoặc bot comment, rồi mở báo cáo trên Pages. Lịch sử tìm được theo PR, run hoặc SHA. Khi không công bố được, xem thông báo **Publication skipped** hoặc lỗi trong workflow **Publish advisory security report** và lấy artifact CI-4 từ Gate run.
-4. Báo cáo công khai chứa rule ID, finding digest, phân loại, các giá trị feature trong schema, điểm và hạng. Tên resource, tên/đường dẫn nguồn, span và tiêu đề từ scanner được lược khỏi projection mới. Terraform thô, credentials, raw Gate JSON và log thô nằm ngoài dữ liệu công bố. Bản công khai giữ checksum Gate export gốc để đối chiếu artifact CI-4. Giới hạn hồ sơ công khai là 64 findings; kết quả lớn hơn hoặc thiếu bằng chứng vẫn giữ Gate outcome và artifact nếu upload thành công.
+1. Dùng `main` hoặc tạo nhánh từ `main` đã có workflow push. Tự tạo 1–64 tệp `.tf` công khai trực tiếp dưới `terraform/`, tối đa 1 MiB mỗi tệp và 2 MiB tổng. Tên tệp dùng chữ, số, dấu gạch, dấu chấm hoặc underscore ASCII. Phạm vi hiện tại chỉ hỗ trợ tệp thường ở root module. Thư mục lồng, symlink, submodule, `.tf.json`, `.tfvars` và `.tfvars.json` nằm ngoài contract.
+2. Dùng `git add -- terraform/`, commit và push lên GitHub. Git tự bỏ qua các tệp cục bộ như Terraform state hoặc `.tfvars` chưa được track. Push thay đổi `terraform/**` trên nhánh workload hoặc `main` tự kích hoạt đánh giá. Nhánh hỗ trợ dùng tên ASCII theo mẫu `[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}`, ngoại trừ `gh-pages`.
+3. Mở **Actions → Security Gate advisory** để đối chiếu SHA. Báo cáo đủ điều kiện xuất hiện trên Pages theo nguồn **Push Assessment**, kèm branch và commit. Lượt push độc lập không cần PR. Nếu có PR, luồng PR chính thức tiếp tục cập nhật comment cho đúng head.
+4. Nếu publisher báo **Publication skipped** hoặc lỗi xác minh, xem lý do trong **Publish advisory security report**. Gate outcome và artifact CI-4 vẫn có trong lượt Gate nếu upload thành công. Báo cáo công khai chứa rule ID, finding digest, phân loại, các giá trị feature trong schema, điểm và hạng. Tên tài nguyên, đường dẫn, span và tiêu đề scanner được lược bỏ. Giới hạn hồ sơ công khai là 64 findings.
 
+Push signal chạy với token chỉ đọc. Với nhánh đã có, signal đối chiếu cây `terraform/` tại before/after để bỏ qua lượt có cây Terraform giống nhau. Với nhánh mới, GitHub xác định tập file thay đổi theo bộ lọc `paths` của push. Workflow Gate trên `main` xác minh signal và dùng chính revision điều khiển để đọc business context. Mã workflow ở commit push phải trùng signal trên revision điều khiển. Chỉ các blob trong `terraform/` của SHA đã pin được đưa vào Gate.
+
+Nếu API cho thấy có PR mở cùng repo vào `main`, cùng branch và SHA, với thay đổi dưới `terraform/`, Gate ưu tiên luồng PR và ghi lý do bỏ qua push trước khi provision runtime. Hai lượt vẫn có thể xuất hiện nếu PR được mở hoặc cập nhật khi push đang chạy, hoặc API chưa cho đủ bằng chứng để bỏ qua. Terraform artifact hash có thể giống nhau giữa các lượt hợp lệ, ví dụ sau khi merge thay đổi vào `main` hoặc khi đánh giá lại với context khác. History lưu mỗi run/attempt và comment vẫn thuộc luồng PR chính thức.
 
 ### Bật Pages và kiểm thử
 
@@ -75,13 +78,14 @@ Dashboard dùng tệp tĩnh và tải `history.json` qua HTTP. Bản mẫu cục
 
 | Loại đánh giá | Nguồn business context | Cập nhật comment chính thức |
 |---|---|---|
+| Push tự động | `config/business-context.json` tại commit điều khiển trên `main` | Chỉ xuất artifact và báo cáo Dashboard nếu đủ điều kiện |
 | PR tự động | `config/business-context.json` tại commit điều khiển trên `main` | Có, nếu input thuộc phạm vi công bố và PR head còn khớp |
 | PR giả định | `workflow_dispatch` trên `main` với tuple và head SHA được chọn | Chỉ xuất artifact và báo cáo Dashboard nếu đủ điều kiện |
 | Fixture | `context_profile`, mặc định CTX01. CTX08 dùng với fixture `ci5` | Chỉ xuất artifact và báo cáo Dashboard nếu đủ điều kiện |
 
 D-039 dùng `dev/prod` cho `environment`, `low/high` cho `asset_criticality` và `data_sensitivity`. Chủ workload cập nhật đúng ba trường trên `main`. Các đánh giá tự động tiếp theo đọc revision mới. Muốn đánh giá lại PR đang mở, cần một sự kiện PR đủ điều kiện. Config sai hoặc thiếu sinh diagnostic `BUSINESS_CONTEXT` với wrapper ERROR/20. Trang công khai giữ các báo cáo đã được công bố.
 
-Đánh giá giả định xác minh PR còn mở và thuộc cùng repository, nhắm `main`, cùng SHA với `expected_head_sha` trước khi checkout. Context được truyền trực tiếp tới Gate D-039 từ workflow tin cậy. Execution và Gate export có `context_provenance` phiên bản `ci5c-context-v1`, gồm loại đánh giá, nguồn context, revision điều khiển, hash config khi có và pin của PR giả định. Report ghi các giá trị context thật và profile tương ứng. Chính sách công bố cấp repository phía trên áp dụng cho cả ba loại. Lượt PR giả định đủ điều kiện xuất hiện trên dashboard và dùng được trong so sánh.
+Đánh giá giả định xác minh PR còn mở và thuộc cùng repository, nhắm `main`, cùng SHA với `expected_head_sha` trước khi checkout. Context được truyền trực tiếp tới Gate D-039 từ workflow tin cậy. Execution và Gate export có `context_provenance` phiên bản `ci5c-context-v1`, gồm loại đánh giá, nguồn context, revision điều khiển, hash config khi có và pin của PR giả định. Report ghi các giá trị context thật và profile tương ứng. Chính sách công bố cấp repository phía trên áp dụng cho các loại đánh giá này. Lượt PR giả định đủ điều kiện xuất hiện trên dashboard và dùng được trong so sánh.
 
 Mục **So sánh bối cảnh** yêu cầu cùng artifact Terraform và commit đã quét, cùng runtime/model và schema tương thích, hai scan chấm điểm hoàn tất và context khác nhau. Đối chiếu `finding_id` một-một và đặc trưng kỹ thuật. Finding ngoài phạm vi hiển thị riêng với điểm/hạng trống. Số điểm thay đổi dùng ngưỡng tuyệt đối `1e-12` trên số gốc. Hạng và tie lấy từ export. Điểm ưu tiên có thể tăng hoặc giảm khi bối cảnh thay đổi.
 

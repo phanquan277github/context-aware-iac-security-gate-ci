@@ -1,6 +1,7 @@
 """Stage and validate the unsigned CI-3B advisory profile."""
 
 import argparse
+import base64
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -17,6 +18,7 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import business_context as bc
+import push_assessment as push
 
 
 RELEASE_ID = "ci-gate-v1"
@@ -222,9 +224,66 @@ def resolve_pr():
     print(f"number={pr['number']}")
 
 
+def event_payload(env):
+    return strict_json(regular(Path(env["GITHUB_EVENT_PATH"])))
+
+
+def github_reader(repo, env):
+    full_name = repo["full_name"]
+    require(repo["default_branch"] == "main" and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", full_name)
+            and env.get("GITHUB_REPOSITORY") == full_name, "Unexpected GitHub repository")
+
+    def fetch(path):
+        req = Request("https://api.github.com/repos/" + full_name + "/" + path,
+                      headers={"Accept": "application/vnd.github+json"})
+        req.add_unredirected_header("Authorization", "Bearer " + env["GH_TOKEN"])
+        with urlopen(req, timeout=30) as response:
+            data = response.read(4_000_001)
+        require(len(data) <= 4_000_000, "Oversized GitHub response")
+        return strict_json(data)
+    return fetch
+
+
+def resolve_push(env, fetch=None):
+    require(env.get("GITHUB_EVENT_NAME") == "workflow_run" and env.get("GITHUB_REF") == "refs/heads/main",
+            "Push assessment requires the trusted main workflow")
+    event = event_payload(env)
+    repo = event["repository"]
+    branch, commit = push.source_identity(event["workflow_run"], repo["id"])
+    reader = github_reader(repo, env)
+    fetch = fetch if fetch is not None else reader
+    # GitHub applies the branch workflow's paths filter. Verify those bytes match the
+    # main-controlled signal, even though the signal job itself has only read access.
+    file = fetch(f"contents/{push.SIGNAL_PATH}?ref={commit}")
+    expected = regular(CONTROL / "workflows" / Path(push.SIGNAL_PATH).name, 4096)
+    require(file["type"] == "file" and file["encoding"] == "base64" and file["size"] == len(expected)
+            and base64.b64decode("".join(file["content"].splitlines()), validate=True) == expected,
+            "Push signal workflow differs from trusted main")
+    try:
+        covered = push.has_eligible_pr(fetch, repo, branch, commit)
+    except (KeyError, OSError, TypeError, ValueError):
+        print("Could not confirm whether the PR lane covers this exact push. Continuing push assessment.", file=sys.stderr)
+        covered = False
+    return None if covered else commit
+
+
+def resolve_signal():
+    env = os.environ
+    if assessment_type(env) == "automatic_push":
+        commit = resolve_push(env)
+        if commit is None:
+            print("skip=yes")
+            print("An eligible open PR covers this exact Terraform revision.", file=sys.stderr)
+        else:
+            print(f"sha={commit}")
+    else:
+        resolve_pr()
+
+
 def assessment_type(env):
     if env.get("GITHUB_EVENT_NAME") == "workflow_run":
-        return "automatic_pr"
+        run = event_payload(env)["workflow_run"] if env.get("GITHUB_EVENT_PATH") else {}
+        return "automatic_push" if run.get("event") == "push" else "automatic_pr"
     if env.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
         mode = env.get("CI_ASSESSMENT_MODE") or "fixture"
         require(mode in {"fixture", "on_demand_pr"}, "Unsupported assessment mode")
@@ -235,10 +294,15 @@ def assessment_type(env):
 def trusted_context(env):
     kind = assessment_type(env)
     revision = env.get("GITHUB_SHA", "")
-    if kind == "automatic_pr":
+    if kind in {"automatic_pr", "automatic_push"}:
         data = regular(CONTROL.parent / bc.CONFIG, 4096)
         context = bc.values(strict_json(data))
-        info = bc.provenance(kind, revision, config_sha=sha(data))
+        if kind == "automatic_push":
+            event = event_payload(env)
+            branch, commit = push.source_identity(event["workflow_run"], event["repository"]["id"])
+            info = bc.provenance(kind, revision, config_sha=sha(data), expected_head=commit, source_branch=branch)
+        else:
+            info = bc.provenance(kind, revision, config_sha=sha(data))
     elif kind == "on_demand_pr":
         context = bc.values({k: env.get("CI_INPUT_" + k.upper()) for k in CONTEXT_KEYS})
         expected = env.get("CI_EXPECTED_HEAD", "")
@@ -277,18 +341,8 @@ def resolve_manual_pr(env, fetch=None):
             "Enter a valid PR number and full lower-case head SHA")
     event = strict_json(regular(Path(env["GITHUB_EVENT_PATH"])))
     repo = event["repository"]
-    full_name = repo["full_name"]
-    require(repo["default_branch"] == "main" and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", full_name)
-            and env.get("GITHUB_REPOSITORY") == full_name, "Unexpected PR repository")
-    if fetch is None:
-        def fetch(path):
-            req = Request("https://api.github.com/repos/" + full_name + "/" + path,
-                          headers={"Accept": "application/vnd.github+json"})
-            req.add_unredirected_header("Authorization", "Bearer " + env["GH_TOKEN"])
-            with urlopen(req, timeout=30) as response:
-                data = response.read(1_000_001)
-            require(len(data) <= 1_000_000, "Oversized GitHub PR response")
-            return strict_json(data)
+    reader = github_reader(repo, env)
+    fetch = fetch if fetch is not None else reader
     return pr_from_api(fetch("pulls/" + number), repo, expected, int(number))
 
 
@@ -388,7 +442,8 @@ def collect_record(args, env=None):
         "gate_json_sha256": None,
         "counts": None,
     }
-    if provenance is not None and (provenance["assessment_type"] == "fixture" or result["pr_number"] is not None):
+    if provenance is not None and (provenance["assessment_type"] == "fixture" or result["pr_number"] is not None
+                                   or provenance["assessment_type"] == "automatic_push" and input_commit is not None):
         result["context_provenance"] = provenance
     if context_error:
         result["failure_stage"] = "BUSINESS_CONTEXT"
@@ -398,6 +453,9 @@ def collect_record(args, env=None):
         if provenance and provenance["assessment_type"] == "on_demand_pr":
             require(provenance["expected_head_sha"] == input_commit and result["pr_number"] is not None,
                     "Evaluated commit differs from the on-demand PR pin")
+        if provenance and provenance["assessment_type"] == "automatic_push":
+            require(provenance["expected_head_sha"] == input_commit and result["pr_number"] is None,
+                    "Evaluated commit differs from the push signal")
         checksum, verified = verified_document(args.bundle, args.raw, args.exit, profile, context)
         counts, scan_complete = result_counts(verified)
         document = verified
@@ -433,6 +491,7 @@ def main():
         "collect": (("bundle", Path), ("raw", Path), ("exit", int), ("report", Path),
                     ("start", str), ("commit", str), ("runtime_sha", str)),
         "resolve-pr": (),
+        "resolve-signal": (),
         "resolve-manual-pr": (),
         "context": (),
     }
@@ -443,7 +502,7 @@ def main():
     args = parser.parse_args()
     runners = {"pack": pack, "unpack": unpack, "stage": prepare_input, "fixture": fixture,
                "provision": toolchain_steps, "resolve-pr": resolve_pr,
-               "resolve-manual-pr": manual_pr_outputs, "context": context_outputs}
+               "resolve-signal": resolve_signal, "resolve-manual-pr": manual_pr_outputs, "context": context_outputs}
     if args.command == "collect":
         collect(args)
         return

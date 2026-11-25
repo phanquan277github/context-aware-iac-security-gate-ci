@@ -14,9 +14,11 @@ const countKeys = ["failed_findings_total", "supported_findings", "unsupported_f
 const context = row => row.business_context ? contextKeys.map(key => row.business_context[key]).join(" / ") : "N/A";
 const runKey = row => row.github_run_id + "/" + row.github_run_attempt;
 const reportDir = row => "reports/" + row.github_run_id + "/attempt-" + row.github_run_attempt + "/";
-const labels = {automatic_pr: "PR tự động", on_demand_pr: "PR giả định", fixture: "Fixture"};
+const labels = {automatic_push: "Push Assessment", automatic_pr: "PR tự động", on_demand_pr: "PR giả định", fixture: "Fixture"};
 const source = row => labels[row.context_provenance?.assessment_type] ||
   (row.trigger_event === "workflow_run" ? labels.automatic_pr : labels.fixture);
+const sourceDetails = row => source(row) + (row.pr_number ? " #" + row.pr_number : "") +
+  (row.context_provenance?.source_branch ? " · " + row.context_provenance.source_branch : "");
 const status = row => row.gate_status || "Diagnostic";
 const states = ["PASS", "REVIEW", "ERROR"];
 let rows = [];
@@ -70,7 +72,8 @@ function sortRows(records) {
 function drawHistory() {
   const query = el("search").value.trim().toLowerCase();
   const visible = rows.filter(row =>
-    [row.github_run_id, row.input_commit_sha, row.scanned_commit_sha, row.pr_number && "#" + row.pr_number]
+    [row.github_run_id, row.input_commit_sha, row.scanned_commit_sha,
+      row.context_provenance?.source_branch, row.pr_number && "#" + row.pr_number]
       .some(value => value && String(value).toLowerCase().includes(query)) &&
     (!el("status").value || status(row) === el("status").value) &&
     (!el("trigger").value || source(row) === el("trigger").value) &&
@@ -82,7 +85,7 @@ function drawHistory() {
     const tr = tag("tr", "");
     const counts = row.counts ? countKeys.slice(0,3).map(key => row.counts[key]).join(" / ") : "N/A";
     const facts = [row.started_utc, status(row) + " / " + row.wrapper_status, runKey(row),
-      source(row) + (row.pr_number ? " #" + row.pr_number : ""), context(row), counts];
+      sourceDetails(row), context(row), counts];
     tr.append(...facts.map(value => tag("td", value)));
     tr.children[1].className = status(row);
     const td = tag("td", "");
@@ -138,7 +141,7 @@ function pairDetails(row, side) {
   const counts = row.counts;
   const details = [["Run / attempt",runKey(row)], ["PR",row.pr_number ? "#" + row.pr_number : null],
     ["Commit đã quét",row.scanned_commit_sha],["Terraform SHA-256",row.terraform_artifact_sha256],
-    ["Loại đánh giá",source(row)],["Business context",context(row)],["Model",row.deployment_model_id],
+    ["Loại đánh giá",sourceDetails(row)],["Business context",context(row)],["Model",row.deployment_model_id],
     ["Model SHA-256",row.model_sha256],["Runtime commit",row.trusted_runtime_commit_sha],
     ["Runtime SHA-256",row.runtime_archive_sha256],["Quét hoàn tất",String(row.scan_complete)],
     ["Failed / scored / unsupported / unscorable", counts && countKeys.map(key => counts[key]).join(" / ")]];
